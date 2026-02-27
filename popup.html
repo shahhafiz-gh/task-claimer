@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=360" />
+  <title>Task Auto Claimer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <div class="popup-container">
+
+    <!-- Header -->
+    <div class="header">
+      <div class="header-left">
+        <div class="header-icon">⚡</div>
+        <span class="header-title">Task Auto Claimer</span>
+      </div>
+      <span class="header-badge">v1.1.0</span>
+    </div>
+
+    <!-- Status Bar -->
+    <div class="status-bar paused" id="statusBar">
+      <div class="status-dot" id="statusDot"></div>
+      <span class="status-text" id="statusText">Paused</span>
+    </div>
+
+    <!-- Master Toggle -->
+    <div class="toggle-section">
+      <span class="toggle-label">Auto Claim</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="masterToggle" />
+        <span class="toggle-track"></span>
+        <span class="toggle-thumb"></span>
+      </label>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Tasks Claimed</div>
+        <div class="stat-value" id="totalClaimed">0</div>
+      </div>
+      <div class="stat-card stat-card-warning">
+        <div class="stat-label">🛡️ BB Skipped</div>
+        <div class="stat-value" id="totalSkippedBotBouncer">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Last Captcha</div>
+        <div class="stat-value small" id="lastCaptcha">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Last Skipped</div>
+        <div class="stat-value small" id="lastSkippedSubreddit">—</div>
+      </div>
+      <div class="stat-card full-width">
+        <div class="stat-label">Last Task</div>
+        <div class="stat-value small" id="lastTask">No tasks claimed yet</div>
+      </div>
+    </div>
+
+    <!-- Settings (Collapsible) -->
+    <div class="settings-section">
+      <div class="settings-header" id="settingsToggle">
+        <span class="settings-title">⚙ Advanced Settings</span>
+        <span class="settings-chevron" id="settingsChevron">▼</span>
+      </div>
+      <div class="settings-body" id="settingsBody">
+        <div class="settings-content">
+
+          <!-- BotBouncer Toggle (prominent) -->
+          <div class="checkbox-row botbouncer-row">
+            <div class="checkbox-label-group">
+              <span class="checkbox-label">🛡️ BotBouncer Guard</span>
+              <span class="checkbox-sublabel">Skip tasks from protected subreddits</span>
+            </div>
+            <label class="mini-toggle">
+              <input type="checkbox" id="botBouncerToggle" checked />
+              <span class="mini-track"></span>
+              <span class="mini-thumb"></span>
+            </label>
+          </div>
+
+          <div class="settings-divider"></div>
+
+          <!-- Custom Selectors -->
+          <div class="input-group">
+            <label class="input-label" for="claimSelector">Claim Button Selector</label>
+            <input class="input-field" type="text" id="claimSelector" placeholder='e.g. button.claim-btn, #grabTask'
+              spellcheck="false" />
+          </div>
+
+          <div class="input-group">
+            <label class="input-label" for="captchaSelector">Captcha Text Selector</label>
+            <input class="input-field" type="text" id="captchaSelector" placeholder='e.g. .captcha-text, #mathProblem'
+              spellcheck="false" />
+          </div>
+
+          <div class="input-group">
+            <label class="input-label" for="captchaInputSelector">Captcha Input Selector</label>
+            <input class="input-field" type="text" id="captchaInputSelector" placeholder='e.g. input#captchaAnswer'
+              spellcheck="false" />
+          </div>
+
+          <div class="input-group">
+            <label class="input-label" for="submitSelector">Submit Button Selector</label>
+            <input class="input-field" type="text" id="submitSelector" placeholder='e.g. button.submit, #submitBtn'
+              spellcheck="false" />
+          </div>
+
+          <!-- Delay Slider -->
+          <div class="range-group">
+            <div class="range-header">
+              <span class="input-label">Action Delay</span>
+              <span class="range-value" id="delayValue">0ms</span>
+            </div>
+            <input class="range-slider" type="range" id="delaySlider" min="0" max="200" step="5" value="0" />
+          </div>
+
+          <!-- Mini Toggles -->
+          <div class="checkbox-row">
+            <span class="checkbox-label">Sound Notifications</span>
+            <label class="mini-toggle">
+              <input type="checkbox" id="soundToggle" checked />
+              <span class="mini-track"></span>
+              <span class="mini-thumb"></span>
+            </label>
+          </div>
+
+          <div class="checkbox-row">
+            <span class="checkbox-label">Safe Mode (random delay)</span>
+            <label class="mini-toggle">
+              <input type="checkbox" id="safeModeToggle" />
+              <span class="mini-track"></span>
+              <span class="mini-thumb"></span>
+            </label>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- Activity Log (Collapsible) -->
+    <div class="settings-section log-section">
+      <div class="settings-header" id="logToggle">
+        <span class="settings-title">📋 Activity Log</span>
+        <span class="settings-chevron" id="logChevron">▼</span>
+      </div>
+      <div class="settings-body" id="logBody">
+        <div class="log-container" id="logContainer">
+          <div class="log-empty" id="logEmpty">No activity yet</div>
+        </div>
+        <div class="log-actions">
+          <button class="log-clear-btn" id="logClearBtn">Clear Logs</button>
+          <button class="log-refresh-btn" id="logRefreshBtn">Refresh</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <span class="footer-text">Task Auto Claimer · v1.1.0 · BotBouncer Guard</span>
+    </div>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>

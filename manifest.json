@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Task Auto Claimer",
-  "version": "1.0.0",
-  "description": "Automatically monitors, claims tasks, solves math captchas, and submits — optimized for sub-1-second response.",
+  "version": "2.0.0",
+  "description": "Accept First, Verify Later — ultra-fast task claiming (<200ms) with parallel BotBouncer protection.",
   "permissions": [
     "storage",
     "activeTab",

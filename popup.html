@@ -17,7 +17,7 @@
         <div class="header-icon">⚡</div>
         <span class="header-title">Task Auto Claimer</span>
       </div>
-      <span class="header-badge">v1.1.0</span>
+      <span class="header-badge">v2.0.0</span>
     </div>
 
     <!-- Status Bar -->
@@ -60,20 +60,73 @@
       </div>
     </div>
 
-    <!-- Settings (Collapsible) -->
-    <div class="settings-section">
-      <div class="settings-header" id="settingsToggle">
-        <span class="settings-title">⚙ Advanced Settings</span>
-        <span class="settings-chevron" id="settingsChevron">▼</span>
+    <!-- ═══ BotBouncer Logs Panel (NEW) ═══ -->
+    <div class="settings-section bb-section">
+      <div class="settings-header" id="bbLogsToggle">
+        <span class="settings-title">🛡️ BotBouncer Logs</span>
+        <span class="settings-chevron" id="bbLogsChevron">▼</span>
       </div>
-      <div class="settings-body" id="settingsBody">
+      <div class="settings-body" id="bbLogsBody">
+        <!-- BB Stats Bar -->
+        <div class="bb-stats-bar">
+          <div class="bb-stat">
+            <span class="bb-stat-label">Claimed Today</span>
+            <span class="bb-stat-value" id="bbStatClaimed">0</span>
+          </div>
+          <div class="bb-stat">
+            <span class="bb-stat-label">Skipped (BB)</span>
+            <span class="bb-stat-value bb-stat-warn" id="bbStatSkipped">0</span>
+          </div>
+          <div class="bb-stat">
+            <span class="bb-stat-label">Cache Entries</span>
+            <span class="bb-stat-value" id="bbStatCache">0</span>
+          </div>
+        </div>
+
+        <!-- BB Logs Table -->
+        <div class="bb-table-container" id="bbTableContainer">
+          <table class="bb-table">
+            <thead>
+              <tr>
+                <th>Subreddit</th>
+                <th>Status</th>
+                <th>Time</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="bbTableBody">
+              <tr class="bb-empty-row">
+                <td colspan="4" class="bb-empty">No checks recorded yet</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- BB Controls -->
+        <div class="bb-controls">
+          <button class="bb-btn bb-btn-clear" id="bbClearLogsBtn" title="Clear display logs">Clear Logs</button>
+          <button class="bb-btn bb-btn-cache" id="bbClearCacheBtn" title="Remove all cached BB results">Clear
+            Cache</button>
+          <button class="bb-btn bb-btn-export" id="bbExportBtn" title="Export logs as JSON">Export</button>
+          <button class="bb-btn bb-btn-refresh" id="bbRefreshBtn" title="Refresh logs">↻</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ BotBouncer Settings (NEW) ═══ -->
+    <div class="settings-section">
+      <div class="settings-header" id="bbSettingsToggle">
+        <span class="settings-title">🛡️ BotBouncer Settings</span>
+        <span class="settings-chevron" id="bbSettingsChevron">▼</span>
+      </div>
+      <div class="settings-body" id="bbSettingsBody">
         <div class="settings-content">
 
           <!-- BotBouncer Toggle (prominent) -->
           <div class="checkbox-row botbouncer-row">
             <div class="checkbox-label-group">
-              <span class="checkbox-label">🛡️ BotBouncer Guard</span>
-              <span class="checkbox-sublabel">Skip tasks from protected subreddits</span>
+              <span class="checkbox-label">🛡️ Auto-Skip Protected</span>
+              <span class="checkbox-sublabel">Skip tasks from BotBouncer subreddits</span>
             </div>
             <label class="mini-toggle">
               <input type="checkbox" id="botBouncerToggle" checked />
@@ -83,6 +136,58 @@
           </div>
 
           <div class="settings-divider"></div>
+
+          <!-- BB Check Timeout -->
+          <div class="range-group">
+            <div class="range-header">
+              <span class="input-label">BB Check Timeout</span>
+              <span class="range-value" id="bbTimeoutValue">10000ms</span>
+            </div>
+            <input class="range-slider" type="range" id="bbTimeoutSlider" min="2000" max="15000" step="500"
+              value="10000" />
+          </div>
+
+          <!-- On Timeout Action -->
+          <div class="select-group">
+            <label class="input-label" for="bbTimeoutAction">On Timeout</label>
+            <select class="select-field" id="bbTimeoutAction">
+              <option value="abort" selected>Abort (Strict — Recommended)</option>
+              <option value="submit">Submit Anyway (Risky)</option>
+            </select>
+          </div>
+
+          <!-- Cache Duration -->
+          <div class="select-group">
+            <label class="input-label" for="bbCacheDuration">Cache Duration</label>
+            <select class="select-field" id="bbCacheDuration">
+              <option value="600000">10 minutes</option>
+              <option value="1800000" selected>30 minutes</option>
+              <option value="3600000">60 minutes</option>
+            </select>
+          </div>
+
+          <!-- Max Parallel Checks -->
+          <div class="select-group">
+            <label class="input-label" for="bbMaxParallel">Max Parallel Checks</label>
+            <select class="select-field" id="bbMaxParallel">
+              <option value="1">1</option>
+              <option value="2" selected>2</option>
+              <option value="3">3</option>
+            </select>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings (Collapsible) -->
+    <div class="settings-section">
+      <div class="settings-header" id="settingsToggle">
+        <span class="settings-title">⚙ Advanced Settings</span>
+        <span class="settings-chevron" id="settingsChevron">▼</span>
+      </div>
+      <div class="settings-body" id="settingsBody">
+        <div class="settings-content">
 
           <!-- Custom Selectors -->
           <div class="input-group">
@@ -160,7 +265,7 @@
 
     <!-- Footer -->
     <div class="footer">
-      <span class="footer-text">Task Auto Claimer · v1.1.0 · BotBouncer Guard</span>
+      <span class="footer-text">Task Auto Claimer · v2.0.0 · Accept First, Verify Later</span>
     </div>
 
   </div>

@@ -1,31 +1,35 @@
 /**
- * Content Script — Task Auto Claimer v4 — Speed + Anti-False-Claim
+ * Content Script — Task Auto Claimer v5 — "Accept First, Verify Later"
  *
  * Architecture:
  *   ONE MutationObserver watching document.body
  *   Observes: childList + subtree + attributes (style/class/hidden)
  *   Every mutation triggers stage checks:
- *     A) "Accept Task" button → BotBouncer check → click if safe
+ *     A) "Accept Task" button → click IMMEDIATELY, fire BB check in parallel
  *     B) Confirmation button (Yes accept / Yes claim / Confirm)
- *     C) Captcha text + input + submit
- *     D) [NEW] Error/toast detection — abort if task was already claimed
+ *     C) Captcha text + input → solve + HOLD submission
+ *     D) Final decision: submit if safe, abort if unsafe
+ *     E) Error/toast detection — abort if task was already claimed
  *
- * BotBouncer Protection:
- *   Before clicking "Accept Task", extracts the subreddit from the task card,
- *   sends a CHECK_BOTBOUNCER message to the background script, and only proceeds
- *   if the subreddit does NOT have BotBouncer as a moderator.
- *
- * Anti-False-Claim:
- *   After captcha submission, waits up to 1.5s monitoring for error toasts.
- *   Only reports TASK_CLAIMED if no error/failure toast detected.
- *   If an error toast appears at ANY stage, immediately aborts and resets.
+ * New Flow ("Accept First, Verify Later"):
+ *   1. Task appears → Click Accept IMMEDIATELY (<50ms)
+ *   2. Extract subreddit, fire background BB check (async)
+ *   3. Solve captcha, store solved value (DON'T submit)
+ *   4. When BB result arrives:
+ *      - Safe → submit captcha
+ *      - Unsafe → silently abort
+ *      - Timeout → configurable (submit or abort)
+ *   5. Log result in popup panel
+ *   6. Cache for next time
  *
  * Zero polling. Zero setInterval. Fully event-driven.
- * Target reaction time: < 50ms.
+ * Target reaction time: < 50ms to click Accept.
  */
 
 (() => {
     'use strict';
+
+    console.log('[TaskBot] 🚀 Content script v5 loaded — "Accept First, Verify Later"');
 
     // ─── State ───────────────────────────────────────────────────────
     let observer = null;
@@ -34,7 +38,8 @@
     // Stage flags — prevent duplicate clicks/submissions per cycle
     let hasClickedAccept = false;
     let hasClickedConfirm = false;
-    let hasSubmittedCaptcha = false;
+    let hasSolvedCaptcha = false;   // captcha solved but NOT submitted
+    let hasSubmittedCaptcha = false; // captcha actually submitted
 
     // Verification state — wait after captcha to confirm success
     let isVerifyingClaim = false;
@@ -42,19 +47,29 @@
     let pendingCaptchaText = null;
     let pendingCaptchaAnswer = null;
 
-    // BotBouncer concurrency flags
-    let isCheckingBotBouncer = false;
-    let pendingAcceptButton = null;
+    // ─── NEW: Parallel BB Check State ────────────────────────────────
+    let pendingSubreddit = null;     // subreddit for current task
+    let bbCheckCompleted = false;    // whether BB check has returned
+    let bbCheckResult = true;        // true = safe, false = unsafe
+    let abortSubmission = false;     // set true if BB found
+    let bbCheckTimer = null;         // timeout timer for BB check
+
+    // Stored captcha elements for deferred submission
+    let storedCaptchaInput = null;
+    let storedSubmitBtn = null;
 
     // WeakSet to track already-handled elements (extra safety)
     const handledElements = new WeakSet();
 
-    // Rate-limit: track last BotBouncer check time
-    let lastBotBouncerCheckTime = 0;
-    const BOT_BOUNCER_RATE_LIMIT_MS = 50; // reduced from 500ms for speed
-
     // Track the current subreddit being claimed for logging
     let currentSubreddit = null;
+
+    // ─── Local Subreddit Safety Cache ────────────────────────────────
+    // key: subreddit (lowercase), value: { safe: boolean, timestamp: number }
+    const subredditCache = new Map();
+
+    // Mutation counter for diagnostics
+    let mutationCount = 0;
 
     let settings = {
         claimSelector: '',
@@ -65,27 +80,27 @@
         delayMs: 0,
         safeModeEnabled: false,
         botBouncerCheckEnabled: true,
+        bbCheckTimeoutMs: 10000,     // max wait for BB check (10s — generous, always aborts on timeout)
+        bbTimeoutAction: 'abort',    // STRICT: always abort on timeout, never submit without green signal
+        bbCacheDurationMs: 30 * 60 * 1000, // 30 minutes
+        maxParallelChecks: 2,
     };
 
     // ─── Error Toast / Failure Detection ─────────────────────────────
     /**
-     * Keywords that indicate the task was already claimed by someone else
-     * or that the claim failed. These appear in toast/snackbar notifications.
-     * Add more patterns as discovered.
+     * STRICT error patterns — only things that DEFINITELY mean the task
+     * claim failed. Removed vague patterns like 'called by client',
+     * 'expired', 'someone else', 'not available' which cause false
+     * positives on pages like earntask.io that have those words in
+     * normal page content.
      */
     const ERROR_TOAST_PATTERNS = [
         'already claimed',
         'already been claimed',
-        'claimed by',
-        'called by client',
+        'called by client',          // earntask.io specific — "error called by client"
         'task is no longer available',
-        'no longer available',
         'task unavailable',
-        'expired',
         'task has been taken',
-        'someone else',
-        'too late',
-        'not available',
         'error claiming',
         'failed to claim',
         'claim failed',
@@ -95,90 +110,81 @@
     ];
 
     /**
-     * Selectors for common toast/snackbar/notification containers.
+     * Selectors for toast/snackbar containers — these are the ONLY
+     * elements we check for error text. We do NOT scan all added nodes.
      */
     const TOAST_SELECTORS = [
-        // Common toast frameworks
-        '[class*="toast"]',
-        '[class*="Toast"]',
-        '[class*="snackbar"]',
-        '[class*="Snackbar"]',
-        '[class*="notification"]',
-        '[class*="Notification"]',
-        '[class*="alert"]',
-        '[class*="Alert"]',
+        '[class*="toast"]', '[class*="Toast"]',
+        '[class*="snackbar"]', '[class*="Snackbar"]',
         '[role="alert"]',
-        '[role="status"]',
-        '[class*="message"]',
-        '[class*="Message"]',
-        '[class*="error"]',
-        '[class*="Error"]',
-        '[class*="banner"]',
-        // Ant Design / Material UI / etc
-        '.ant-message',
-        '.ant-notification',
-        '.MuiSnackbar-root',
-        '.MuiAlert-root',
-        // Generic
-        '[class*="popup"]',
-        '[class*="flash"]',
-        '[class*="notice"]',
+        '.ant-message', '.ant-notification',
+        '.MuiSnackbar-root', '.MuiAlert-root',
+        '[class*="flash"]', '[class*="notice"]',
     ];
 
-    /**
-     * Check if any visible toast/notification contains an error about the task
-     * being already claimed or unavailable.
-     * Returns the detected error text if found, or null.
-     */
     function detectErrorToast() {
-        // Strategy 1: Check known toast containers
         for (const selector of TOAST_SELECTORS) {
             try {
                 const els = document.querySelectorAll(selector);
                 for (const el of els) {
                     const text = (el.textContent || '').toLowerCase().trim();
-                    if (!text) continue;
-
+                    if (!text || text.length > 300) continue; // skip large containers
                     for (const pattern of ERROR_TOAST_PATTERNS) {
                         if (text.includes(pattern)) {
-                            // Verify the element is visible
                             const style = window.getComputedStyle(el);
                             if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                                console.warn(`[TaskBot] 🚨 Error toast matched: "${pattern}" in element:`, el.tagName, el.className);
                                 return text;
                             }
                         }
                     }
                 }
-            } catch { /* selector might be invalid in some DOMs */ }
+            } catch (e) { /* selector might be invalid */ }
         }
-
-        // Strategy 2: Quick scan of recently-added elements (new nodes from mutations)
-        // This is handled in the mutation observer callback directly
-
         return null;
     }
 
     /**
-     * Scan specific mutation nodes for error toast text.
-     * Much faster than scanning the whole DOM — only checks what just changed.
+     * Check newly added mutation nodes for error toasts.
+     * STRICT: Only checks nodes that MATCH a toast selector.
+     * Does NOT blindly scan all added nodes — that causes false positives
+     * when normal page content (task descriptions, etc.) contains error-like words.
      */
     function checkMutationsForErrorToast(mutations) {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (node.nodeType !== Node.ELEMENT_NODE) continue;
 
+                // Only check this node if it matches a known toast selector
+                let isToastElement = false;
+                for (const selector of TOAST_SELECTORS) {
+                    try {
+                        if (node.matches && node.matches(selector)) {
+                            isToastElement = true;
+                            break;
+                        }
+                        // Also check if any child matches a toast selector
+                        if (node.querySelector && node.querySelector(selector)) {
+                            isToastElement = true;
+                            break;
+                        }
+                    } catch (e) { /* invalid selector */ }
+                }
+
+                if (!isToastElement) continue; // Skip non-toast nodes entirely
+
                 const text = (node.textContent || '').toLowerCase().trim();
-                if (!text) continue;
+                if (!text || text.length > 300) continue; // skip large containers
 
                 for (const pattern of ERROR_TOAST_PATTERNS) {
                     if (text.includes(pattern)) {
-                        // Quick visibility check
                         try {
                             const style = window.getComputedStyle(node);
                             if (style.display !== 'none' && style.visibility !== 'hidden') {
+                                console.warn(`[TaskBot] 🚨 Error toast in mutation: "${pattern}" in`, node.tagName, node.className);
                                 return text;
                             }
-                        } catch { /* node may have been removed */ }
+                        } catch (e) { /* node may have been removed */ }
                     }
                 }
             }
@@ -186,47 +192,67 @@
         return null;
     }
 
-    /**
-     * Called when an error toast is detected — aborts current claim flow.
-     */
+    // ─── Abort Claim ─────────────────────────────────────────────────
     function abortClaim(reason) {
-        console.warn(`[TaskBot] ❌ ABORT — Error detected: "${reason}"`);
+        console.warn(`[TaskBot] ❌ ABORT — ${reason}`);
 
-        // Cancel verification timer if running
         if (verifyTimer) {
             clearTimeout(verifyTimer);
             verifyTimer = null;
         }
+        if (bbCheckTimer) {
+            clearTimeout(bbCheckTimer);
+            bbCheckTimer = null;
+        }
 
-        // We did NOT actually claim it — notify background
         notifyBackground('TASK_CLAIM_FAILED', {
             reason,
             subreddit: currentSubreddit,
         });
 
-        // Full reset for next cycle
+        isVerifyingClaim = false;
+        resetState();
+    }
+
+    /**
+     * Silently abort — used when BB detects unsafe subreddit.
+     * Don't submit anything, let the task expire naturally.
+     */
+    function silentAbort(subreddit) {
+        console.warn(`[TaskBot] 🛡️ Silent abort — r/${subreddit} has BotBouncer`);
+
+        if (verifyTimer) {
+            clearTimeout(verifyTimer);
+            verifyTimer = null;
+        }
+        if (bbCheckTimer) {
+            clearTimeout(bbCheckTimer);
+            bbCheckTimer = null;
+        }
+
+        notifyBackground('TASK_SKIPPED_BOTBOUNCER', { subreddit });
+
+        // Log BB result
+        notifyBackground('BB_LOG_ENTRY', {
+            subreddit,
+            status: 'unsafe',
+            action: 'skipped',
+        });
+
         isVerifyingClaim = false;
         resetState();
     }
 
     // ─── View Task Detection (Positive Success Signal) ───────────────
-
-    /**
-     * Detects the "View Task" button which appears ONLY when a task is
-     * actually successfully claimed. This is the definitive success signal.
-     * Returns true if found, false otherwise.
-     */
     function detectViewTaskButton() {
         const buttons = getAllButtons(document.body);
         for (const btn of buttons) {
             if (!isClickableButton(btn)) continue;
             const text = getText(btn);
-            // Match: "view task", "view your task", etc.
             if (text.includes('view') && text.includes('task')) {
                 return true;
             }
         }
-        // Also check links that might say "view task"
         const links = document.querySelectorAll('a');
         for (const link of links) {
             const text = getText(link);
@@ -236,16 +262,12 @@
                     if (style.display !== 'none' && style.visibility !== 'hidden') {
                         return true;
                     }
-                } catch { /* ignore */ }
+                } catch (e) { /* ignore */ }
             }
         }
         return false;
     }
 
-    /**
-     * Checks newly added mutation nodes for a "View Task" button.
-     * Faster than scanning the whole DOM.
-     */
     function checkMutationsForViewTask(mutations) {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
@@ -259,11 +281,7 @@
         return false;
     }
 
-    /**
-     * Called when "View Task" button is detected — confirms real claim.
-     */
     function confirmClaimSuccess() {
-        // Cancel safety timer
         if (verifyTimer) {
             clearTimeout(verifyTimer);
             verifyTimer = null;
@@ -278,334 +296,434 @@
             subreddit: currentSubreddit,
         });
 
-        // Reset for next task cycle
+        // Log BB result as safe + claimed
+        if (currentSubreddit) {
+            notifyBackground('BB_LOG_ENTRY', {
+                subreddit: currentSubreddit,
+                status: 'safe',
+                action: 'claimed',
+            });
+        }
+
         resetState();
     }
 
     // ─── Captcha Solver ──────────────────────────────────────────────
-    /**
-     * Parses simple addition captcha text and returns the sum.
-     * Handles: "1+2", "3 + 7", " 11 +  6 ", "12+9", etc.
-     * Uses regex: /(\d+)\s*\+\s*(\d+)/
-     * Returns null if no valid expression found.
-     */
     function solveAddition(text) {
         if (!text || typeof text !== 'string') return null;
-
         const match = text.match(/(\d+)\s*\+\s*(\d+)/);
         if (!match) return null;
-
         const a = parseInt(match[1], 10);
         const b = parseInt(match[2], 10);
-
         if (isNaN(a) || isNaN(b)) return null;
-
         return a + b;
     }
 
     // ─── DOM Helpers ─────────────────────────────────────────────────
-
-    /**
-     * Check if an element is visible and enabled.
-     */
     function isClickableButton(el) {
         if (!el) return false;
         if (el.disabled) return false;
         if (el.getAttribute('aria-disabled') === 'true') return false;
-
-        // Check computed visibility — catches display:none, visibility:hidden, opacity:0
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none') return false;
-        if (style.visibility === 'hidden') return false;
-        if (style.opacity === '0') return false;
-        if (el.offsetParent === null && style.position !== 'fixed' && style.position !== 'sticky') return false;
-
+        try {
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none') return false;
+            if (style.visibility === 'hidden') return false;
+            if (style.opacity === '0') return false;
+            if (el.offsetParent === null && style.position !== 'fixed' && style.position !== 'sticky') return false;
+        } catch (e) {
+            return false;
+        }
         return true;
     }
 
-    /**
-     * Get normalized text from an element.
-     */
     function getText(el) {
         return (el.textContent || el.value || el.innerText || '').trim().toLowerCase();
     }
 
-    /**
-     * Fills an input field with a value, dispatching proper events
-     * so frameworks (React, Vue, Angular) detect the change.
-     */
     function fillInput(input, value) {
         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype, 'value'
-        )?.set;
-
-        if (nativeInputValueSetter) {
-            nativeInputValueSetter.call(input, String(value));
+        );
+        if (nativeInputValueSetter && nativeInputValueSetter.set) {
+            nativeInputValueSetter.set.call(input, String(value));
         } else {
             input.value = String(value);
         }
-
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
-    /**
-     * Simulates pressing Enter on an element — fires keydown, keypress, keyup.
-     */
     function simulateEnter(element) {
         const opts = {
-            key: 'Enter',
-            code: 'Enter',
-            keyCode: 13,
-            which: 13,
-            bubbles: true,
+            key: 'Enter', code: 'Enter',
+            keyCode: 13, which: 13, bubbles: true,
         };
         element.dispatchEvent(new KeyboardEvent('keydown', opts));
         element.dispatchEvent(new KeyboardEvent('keypress', opts));
         element.dispatchEvent(new KeyboardEvent('keyup', opts));
     }
 
-    /**
-     * Get all clickable button-like elements from a root.
-     */
     function getAllButtons(root) {
         return root.querySelectorAll('button, [role="button"], a.btn, input[type="button"], input[type="submit"]');
     }
 
     // ─── Subreddit Extraction ────────────────────────────────────────
-
-    /**
-     * Extracts the subreddit name from the task card surrounding the Accept button.
-     * Looks for links containing /r/[subreddit]/ pattern.
-     *
-     * Strategy:
-     *   1. Walk up from the button to find the closest "card-like" container
-     *   2. Search for any <a> with href matching /r/subreddit/
-     *   3. Fallback: search the entire visible page for subreddit links near the button
-     *
-     * Returns the subreddit name (lowercase) or null if not found.
-     */
     function extractSubredditFromTaskCard(button) {
         if (!button) return null;
-
         const subredditRegex = /\/r\/([a-zA-Z0-9_]+)/i;
-
-        // Strategy 1: Look in the closest card/container ancestor
         const cardSelectors = [
             '[class*="task"]', '[class*="card"]', '[class*="item"]',
             '[class*="row"]', '[class*="job"]', '[class*="listing"]',
             'tr', 'li', 'article', 'section',
             '[role="listitem"]', '[role="row"]',
         ];
-
         let searchRoot = null;
-
-        // Try to find a meaningful container
         for (const sel of cardSelectors) {
             const container = button.closest(sel);
-            if (container) {
-                searchRoot = container;
-                break;
-            }
+            if (container) { searchRoot = container; break; }
         }
-
-        // Fallback: walk up to a reasonable parent (max 6 levels)
         if (!searchRoot) {
             searchRoot = button;
             for (let i = 0; i < 6 && searchRoot.parentElement; i++) {
                 searchRoot = searchRoot.parentElement;
             }
         }
-
-        // Search for subreddit links within the container
         const links = searchRoot.querySelectorAll('a[href*="/r/"]');
         for (const link of links) {
             const match = link.href.match(subredditRegex);
-            if (match) {
-                return match[1].toLowerCase();
-            }
+            if (match) return match[1].toLowerCase();
         }
-
-        // Strategy 2: Check text content for r/subreddit patterns
         const textContent = searchRoot.textContent || '';
         const textMatch = textContent.match(/\br\/([a-zA-Z0-9_]+)\b/i);
-        if (textMatch) {
-            return textMatch[1].toLowerCase();
-        }
-
-        // Strategy 3: Broadest fallback — scan all links on the page
+        if (textMatch) return textMatch[1].toLowerCase();
         const allLinks = document.querySelectorAll('a[href*="/r/"]');
         for (const link of allLinks) {
             const match = link.href.match(subredditRegex);
-            if (match) {
-                return match[1].toLowerCase();
-            }
+            if (match) return match[1].toLowerCase();
         }
-
         return null;
     }
 
-    // ─── BotBouncer Check ────────────────────────────────────────────
+    // ─── Local Cache Check ───────────────────────────────────────────
+    function checkLocalCache(subreddit) {
+        const key = subreddit.toLowerCase();
+        const cached = subredditCache.get(key);
+        if (cached && (Date.now() - cached.timestamp) < settings.bbCacheDurationMs) {
+            return { safe: cached.safe, cached: true };
+        }
+        if (cached) {
+            subredditCache.delete(key);
+        }
+        return null;
+    }
 
-    /**
-     * Sends a CHECK_BOTBOUNCER message to background script.
-     * Returns a Promise<{ safe: boolean }>.
-     */
-    function checkBotBouncer(subreddit) {
-        return new Promise((resolve) => {
-            try {
-                chrome.runtime.sendMessage(
-                    { type: 'CHECK_BOTBOUNCER', payload: { subreddit } },
-                    (response) => {
-                        if (chrome.runtime.lastError) {
-                            console.warn('[BotBouncer] Runtime error:', chrome.runtime.lastError.message);
-                            resolve({ safe: false, error: chrome.runtime.lastError.message });
-                            return;
-                        }
-                        resolve(response || { safe: false });
-                    }
-                );
-            } catch (err) {
-                console.warn('[BotBouncer] sendMessage error:', err.message);
-                resolve({ safe: false, error: err.message });
-            }
+    function updateLocalCache(subreddit, safe) {
+        subredditCache.set(subreddit.toLowerCase(), {
+            safe,
+            timestamp: Date.now(),
         });
     }
 
-    // ─── Stage A: Accept Task (with BotBouncer Guard) ────────────────
+    // ─── BotBouncer Background Check (Fire & Forget) ─────────────────
+    function fireBBCheck(subreddit) {
+        console.log(`[BotBouncer] 🔍 Firing parallel check for r/${subreddit}...`);
 
+        notifyBackground('BB_LOG_ENTRY', {
+            subreddit,
+            status: 'pending',
+            action: 'checking',
+        });
+
+        try {
+            chrome.runtime.sendMessage(
+                { type: 'CHECK_BOTBOUNCER', payload: { subreddit } },
+                (response) => {
+                    if (chrome.runtime.lastError) {
+                        console.warn('[BotBouncer] Runtime error:', chrome.runtime.lastError.message);
+                        handleBBResult(subreddit, false, chrome.runtime.lastError.message);
+                        return;
+                    }
+                    const result = response || { safe: false };
+                    handleBBResult(subreddit, result.safe);
+                }
+            );
+        } catch (err) {
+            console.warn('[BotBouncer] sendMessage error:', err.message);
+            handleBBResult(subreddit, false, err.message);
+        }
+    }
+
+    function handleBBResult(subreddit, safe, error) {
+        updateLocalCache(subreddit, safe);
+
+        // ── Always log the BB result so the BB Logs panel updates from "Pending" ──
+        notifyBackground('BB_LOG_ENTRY', {
+            subreddit,
+            status: safe ? 'safe' : 'unsafe',
+            action: safe ? 'confirmed_safe' : (error ? 'check_error' : 'bb_detected'),
+        });
+
+        if (pendingSubreddit !== subreddit) {
+            console.log(`[BotBouncer] Result for r/${subreddit} arrived but task changed — ignoring`);
+            return;
+        }
+
+        bbCheckCompleted = true;
+        bbCheckResult = safe;
+
+        if (bbCheckTimer) {
+            clearTimeout(bbCheckTimer);
+            bbCheckTimer = null;
+        }
+
+        if (safe) {
+            console.log(`[BotBouncer] ✅ r/${subreddit} is SAFE`);
+        } else {
+            console.warn(`[BotBouncer] ⛔ r/${subreddit} is UNSAFE — BotBouncer detected`);
+            abortSubmission = true;
+        }
+
+        if (hasSolvedCaptcha && !hasSubmittedCaptcha) {
+            finalDecision();
+        }
+    }
+
+    // ─── Final Decision: Submit or Abort ─────────────────────────────
     /**
-     * Scans the ENTIRE visible DOM for an "Accept Task" button.
-     * If BotBouncer check is enabled, extracts the subreddit and checks
-     * before clicking. Otherwise, clicks immediately.
+     * STRICT BB ENFORCEMENT:
+     *   - ONLY submit if bbCheckCompleted === true AND bbCheckResult === true (explicitly safe)
+     *   - If BB check not completed yet → DO NOTHING (keep waiting)
+     *   - If BB check completed but unsafe → ABORT
+     *   - If BB check timed out → ABORT (never submit without green signal)
+     *   - If BB check errored → already set safe=false, so ABORT
      */
+    function finalDecision() {
+        if (hasSubmittedCaptcha) return;
+        if (!hasSolvedCaptcha) return;
+
+        // If BB protection is disabled entirely, submit freely
+        if (!settings.botBouncerCheckEnabled) {
+            console.log(`[TaskBot] 🔓 BB check disabled — submitting captcha`);
+            submitCaptcha();
+            return;
+        }
+
+        // STRICT: If abort flag is set (BB detected), abort immediately
+        if (abortSubmission) {
+            console.warn(`[TaskBot] 🛡️ STRICT ABORT — BotBouncer detected in r/${pendingSubreddit}`);
+            silentAbort(pendingSubreddit || 'unknown');
+            return;
+        }
+
+        // STRICT: ONLY submit if we have EXPLICIT confirmation that subreddit is safe
+        if (bbCheckCompleted === true && bbCheckResult === true) {
+            console.log(`[TaskBot] ✅ BB check CONFIRMED SAFE for r/${pendingSubreddit} — submitting captcha`);
+            submitCaptcha();
+            return;
+        }
+
+        // BB check completed but result is NOT safe (error, HTTP failure, etc.)
+        if (bbCheckCompleted === true && bbCheckResult !== true) {
+            console.warn(`[TaskBot] 🛡️ STRICT ABORT — BB check completed but NOT safe for r/${pendingSubreddit}`);
+            notifyBackground('BB_LOG_ENTRY', {
+                subreddit: pendingSubreddit,
+                status: 'unsafe',
+                action: 'aborted_not_safe',
+            });
+            silentAbort(pendingSubreddit || 'unknown');
+            return;
+        }
+
+        // BB check NOT completed yet — this is the timeout path
+        // STRICT: ALWAYS abort on timeout. NEVER submit without green signal.
+        if (!bbCheckCompleted) {
+            console.warn(`[TaskBot] ⏱️ STRICT ABORT — BB check timed out for r/${pendingSubreddit}. Will NOT submit.`);
+            notifyBackground('BB_LOG_ENTRY', {
+                subreddit: pendingSubreddit,
+                status: 'timeout',
+                action: 'aborted_timeout_strict',
+            });
+            silentAbort(pendingSubreddit || 'unknown');
+            return;
+        }
+    }
+
+    function submitCaptcha() {
+        if (hasSubmittedCaptcha) return;
+
+        // ── LAST SAFETY GATE: Double-check BB state before submitting ──
+        if (settings.botBouncerCheckEnabled) {
+            if (!bbCheckCompleted) {
+                console.error('[TaskBot] 🚫 BLOCKED — Tried to submit but BB check not completed! Waiting...');
+                return; // DO NOT submit
+            }
+            if (bbCheckResult !== true) {
+                console.error('[TaskBot] 🚫 BLOCKED — Tried to submit but BB result is NOT safe! Aborting...');
+                silentAbort(pendingSubreddit || 'unknown');
+                return; // DO NOT submit
+            }
+            if (abortSubmission) {
+                console.error('[TaskBot] 🚫 BLOCKED — abortSubmission flag is set! Aborting...');
+                silentAbort(pendingSubreddit || 'unknown');
+                return; // DO NOT submit
+            }
+        }
+
+        hasSubmittedCaptcha = true;
+        console.log(`[TaskBot] 📤 SUBMITTING captcha — BB confirmed safe for r/${pendingSubreddit || 'unknown'}`);
+
+        if (storedSubmitBtn && isClickableButton(storedSubmitBtn)) {
+            handledElements.add(storedSubmitBtn);
+            storedSubmitBtn.click();
+        } else if (storedCaptchaInput) {
+            simulateEnter(storedCaptchaInput);
+        }
+
+        isVerifyingClaim = true;
+        console.log(`[TaskBot] ⏳ Captcha submitted (${pendingCaptchaText} = ${pendingCaptchaAnswer}). Waiting for "View Task" to confirm...`);
+
+        if (detectViewTaskButton()) {
+            confirmClaimSuccess();
+            return;
+        }
+        const immediateError = detectErrorToast();
+        if (immediateError) {
+            abortClaim(immediateError);
+            return;
+        }
+
+        verifyTimer = setTimeout(() => {
+            verifyTimer = null;
+            if (!isVerifyingClaim) return;
+            if (detectViewTaskButton()) { confirmClaimSuccess(); return; }
+            const finalError = detectErrorToast();
+            if (finalError) { abortClaim(finalError); return; }
+            console.warn(`[TaskBot] ⚠️ No confirmation signal after 5s — treating as FAILED`);
+            abortClaim('timeout — no confirmation signal detected');
+        }, 5000);
+    }
+
+    // ─── Stage A: Accept Task (IMMEDIATE — no BB wait) ───────────────
     function tryAcceptTask() {
         if (hasClickedAccept) return false;
-        if (isCheckingBotBouncer) return false; // already checking, wait
-
-        // Rate limit: don't fire checks too rapidly
-        const now = Date.now();
-        if (now - lastBotBouncerCheckTime < BOT_BOUNCER_RATE_LIMIT_MS) return false;
 
         let targetButton = null;
-
         const buttons = getAllButtons(document.body);
         for (const btn of buttons) {
             if (handledElements.has(btn)) continue;
             if (!isClickableButton(btn)) continue;
-
             const text = getText(btn);
-
-            // Match: contains both "accept" and "task"
             if (text.includes('accept') && text.includes('task')) {
                 targetButton = btn;
                 break;
             }
         }
 
-        // Also try user-configured selector if no button found
-        if (!targetButton && settings.claimSelector?.trim()) {
-            const btn = document.querySelector(settings.claimSelector);
-            if (btn && isClickableButton(btn) && !handledElements.has(btn)) {
-                targetButton = btn;
+        // Also try user-configured selector
+        if (!targetButton && settings.claimSelector && settings.claimSelector.trim()) {
+            try {
+                const btn = document.querySelector(settings.claimSelector);
+                if (btn && isClickableButton(btn) && !handledElements.has(btn)) {
+                    targetButton = btn;
+                }
+            } catch (e) {
+                console.warn('[TaskBot] Invalid claimSelector:', e.message);
             }
         }
 
         if (!targetButton) return false;
 
-        // ── BotBouncer check gate ──
-        if (settings.botBouncerCheckEnabled) {
-            const subreddit = extractSubredditFromTaskCard(targetButton);
-
-            if (!subreddit) {
-                // No subreddit found — default: skip to be safe
-                console.warn('[BotBouncer] Could not extract subreddit from task card — SKIPPING (safe default)');
-                handledElements.add(targetButton);
-                notifyBackground('TASK_SKIPPED_BOTBOUNCER', { subreddit: 'unknown' });
-                // Reset so we can check the next task
-                resetState();
-                return false;
-            }
-
-            // Set concurrency flags
-            isCheckingBotBouncer = true;
-            pendingAcceptButton = targetButton;
-            lastBotBouncerCheckTime = Date.now();
-            currentSubreddit = subreddit;
-
-            console.log(`[BotBouncer] Checking r/${subreddit} before accepting task...`);
-
-            checkBotBouncer(subreddit).then((result) => {
-                // Check if button is still in the DOM
-                if (!document.body.contains(pendingAcceptButton)) {
-                    console.warn('[BotBouncer] Button disappeared during check — resetting');
-                    isCheckingBotBouncer = false;
-                    pendingAcceptButton = null;
-                    resetState();
-                    return;
-                }
-
-                if (result.safe) {
-                    // ✓ SAFE — click the button and proceed
-                    console.log(`[BotBouncer] r/${subreddit} is SAFE — accepting task`);
-                    hasClickedAccept = true;
-                    handledElements.add(pendingAcceptButton);
-                    pendingAcceptButton.click();
-                    notifyBackground('STAGE_ACCEPT', {
-                        buttonText: getText(pendingAcceptButton),
-                        subreddit,
-                    });
-                    // Immediately try next stage after click
-                    runCurrentStage();
-                } else {
-                    // ✗ UNSAFE — skip this task
-                    console.warn(`[BotBouncer] r/${subreddit} is UNSAFE — skipping task`);
-                    handledElements.add(pendingAcceptButton);
-                    notifyBackground('TASK_SKIPPED_BOTBOUNCER', { subreddit });
-                    // Don't click — just reset so the next task can be checked
-                    resetState();
-                }
-
-                isCheckingBotBouncer = false;
-                pendingAcceptButton = null;
-            });
-
-            return false; // async — don't proceed yet
-        }
-
-        // ── No BotBouncer check — click immediately (original behavior) ──
+        // ── CLICK IMMEDIATELY — no waiting! ──
         hasClickedAccept = true;
         handledElements.add(targetButton);
         targetButton.click();
-        notifyBackground('STAGE_ACCEPT', { buttonText: getText(targetButton) });
-        // Immediately try next stage
+        console.log(`[TaskBot] ⚡ Accept clicked IMMEDIATELY — "${getText(targetButton)}"`);
+
+        // Extract subreddit
+        const subreddit = extractSubredditFromTaskCard(targetButton);
+        currentSubreddit = subreddit;
+        pendingSubreddit = subreddit;
+
+        notifyBackground('STAGE_ACCEPT', {
+            buttonText: getText(targetButton),
+            subreddit: subreddit || 'unknown',
+        });
+
+        // ── Fire parallel BB check (if enabled) ──
+        if (settings.botBouncerCheckEnabled && subreddit) {
+            const cached = checkLocalCache(subreddit);
+            if (cached) {
+                console.log(`[BotBouncer] 📋 Cache hit for r/${subreddit}: ${cached.safe ? 'SAFE' : 'UNSAFE'}`);
+                bbCheckCompleted = true;
+                bbCheckResult = cached.safe;
+                if (!cached.safe) {
+                    abortSubmission = true;
+                }
+            } else {
+                // BB check NOT cached — must wait for result
+                // bbCheckCompleted stays FALSE until handleBBResult is called
+                fireBBCheck(subreddit);
+
+                // Safety timeout: if BB check takes too long, ABORT (never submit)
+                bbCheckTimer = setTimeout(function () {
+                    bbCheckTimer = null;
+                    if (!bbCheckCompleted) {
+                        console.warn(`[BotBouncer] ⏱️ STRICT: Check timed out after ${settings.bbCheckTimeoutMs}ms — will ABORT if captcha solved`);
+                        // Force abort — mark as unsafe so any pending/future finalDecision aborts
+                        bbCheckCompleted = true;
+                        bbCheckResult = false;  // NOT safe
+                        abortSubmission = true;
+
+                        notifyBackground('BB_LOG_ENTRY', {
+                            subreddit: subreddit,
+                            status: 'timeout',
+                            action: 'marked_unsafe_on_timeout',
+                        });
+
+                        // If captcha is already solved and waiting, trigger abort
+                        if (hasSolvedCaptcha && !hasSubmittedCaptcha) {
+                            finalDecision(); // will abort because abortSubmission=true
+                        }
+                    }
+                }, settings.bbCheckTimeoutMs);
+            }
+        } else if (settings.botBouncerCheckEnabled && !subreddit) {
+            // STRICT: Cannot proceed without knowing the subreddit — mark as UNSAFE
+            console.warn('[BotBouncer] ⛔ STRICT: Could not extract subreddit — treating as UNSAFE');
+            bbCheckCompleted = true;
+            bbCheckResult = false;
+            abortSubmission = true;
+            notifyBackground('BB_LOG_ENTRY', {
+                subreddit: 'unknown',
+                status: 'unsafe',
+                action: 'no_subreddit_strict_abort',
+            });
+        } else {
+            // BB check is disabled — proceed freely
+            bbCheckCompleted = true;
+            bbCheckResult = true;
+        }
+
+        // Immediately try next stage (confirm modal / captcha)
         runCurrentStage();
         return true;
     }
 
     // ─── Stage B: Confirmation Modal ─────────────────────────────────
-
-    /**
-     * Scans the ENTIRE visible DOM for a confirmation button.
-     * 
-     * Matches ANY of these patterns (flexible):
-     *   - Text contains "yes" AND any of: "accept", "claim", "confirm", "continue"
-     *   - Text is exactly or contains "yes, accept" / "yes, claim"
-     *   - Text is "confirm" or "claim" standalone (common modal buttons)
-     * 
-     * Excludes: "cancel", "no", "close" buttons.
-     */
     function tryConfirmation() {
         if (!hasClickedAccept || hasClickedConfirm) return false;
+
+        if (abortSubmission) {
+            silentAbort(pendingSubreddit || 'unknown');
+            return false;
+        }
 
         const buttons = getAllButtons(document.body);
         for (const btn of buttons) {
             if (handledElements.has(btn)) continue;
             if (!isClickableButton(btn)) continue;
-
             const text = getText(btn);
 
-            // Skip negative/cancel buttons
             if (text === 'cancel' || text === 'no' || text === 'close') continue;
 
             // Pattern 1: "yes" + confirmation word
@@ -615,14 +733,14 @@
                     hasClickedConfirm = true;
                     handledElements.add(btn);
                     btn.click();
+                    console.log(`[TaskBot] 🔘 Confirmation clicked: "${text}"`);
                     notifyBackground('STAGE_CONFIRM', { buttonText: text });
-                    // Immediately try next stage
                     runCurrentStage();
                     return true;
                 }
             }
 
-            // Pattern 2: Standalone confirmation words inside a modal/dialog
+            // Pattern 2: Standalone confirmation words inside a modal
             const isInModal = btn.closest('[role="dialog"], [role="alertdialog"], .modal, .dialog, .popup, .overlay, [class*="modal"], [class*="dialog"], [class*="popup"], [class*="confirm"]');
             if (isInModal) {
                 if (text === 'confirm' || text === 'claim' || text === 'accept' ||
@@ -631,34 +749,39 @@
                     hasClickedConfirm = true;
                     handledElements.add(btn);
                     btn.click();
+                    console.log(`[TaskBot] 🔘 Modal confirmation clicked: "${text}"`);
                     notifyBackground('STAGE_CONFIRM', { buttonText: text });
-                    // Immediately try next stage
                     runCurrentStage();
                     return true;
                 }
             }
         }
-
         return false;
     }
 
+    // ─── Stage C: Captcha Solving & HOLDING ──────────────────────────
     function tryCaptcha() {
-        if (!hasClickedConfirm || hasSubmittedCaptcha) return false;
+        if (!hasClickedConfirm || hasSolvedCaptcha) return false;
+
+        if (abortSubmission) {
+            silentAbort(pendingSubreddit || 'unknown');
+            return false;
+        }
 
         // ── Find captcha expression ──
         let captchaText = null;
         let captchaEl = null;
 
-        // Try user-configured captcha selector
-        if (settings.captchaSelector?.trim()) {
-            captchaEl = document.querySelector(settings.captchaSelector);
+        if (settings.captchaSelector && settings.captchaSelector.trim()) {
+            try {
+                captchaEl = document.querySelector(settings.captchaSelector);
+            } catch (e) {
+                console.warn('[TaskBot] Invalid captchaSelector:', e.message);
+            }
         }
-
-        // Try finding math expression in the DOM via TreeWalker
         if (!captchaEl) {
             captchaEl = findMathElement(document.body);
         }
-
         if (!captchaEl) return false;
 
         captchaText = captchaEl.textContent.trim();
@@ -668,43 +791,45 @@
         // ── Find captcha input ──
         let captchaInput = null;
 
-        // Try user-configured input selector
-        if (settings.captchaInputSelector?.trim()) {
-            captchaInput = document.querySelector(settings.captchaInputSelector);
+        if (settings.captchaInputSelector && settings.captchaInputSelector.trim()) {
+            try {
+                captchaInput = document.querySelector(settings.captchaInputSelector);
+            } catch (e) {
+                console.warn('[TaskBot] Invalid captchaInputSelector:', e.message);
+            }
         }
-
-        // Search near the captcha element (modal, dialog, or parent)
         if (!captchaInput) {
             const searchRoot = captchaEl.closest('[role="dialog"], [role="alertdialog"], .modal, .dialog, .popup, .overlay, [class*="modal"], [class*="dialog"], [class*="captcha"], form') || document.body;
             captchaInput = searchRoot.querySelector('input[type="text"], input[type="number"], input.captcha-input, input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"])');
         }
-
-        // Broadest fallback
         if (!captchaInput) {
             captchaInput = document.querySelector('input[type="text"], input[type="number"]');
         }
-
         if (!captchaInput) return false;
 
-        // ── Fill and submit ──
-        hasSubmittedCaptcha = true;
+        // ── Fill the answer (but DON'T submit yet!) ──
+        hasSolvedCaptcha = true;
         handledElements.add(captchaEl);
         handledElements.add(captchaInput);
-
-        // Fill the answer
         fillInput(captchaInput, answer);
 
-        // Find submit button
+        pendingCaptchaText = captchaText;
+        pendingCaptchaAnswer = answer;
+        storedCaptchaInput = captchaInput;
+
+        // Find submit button (store for later)
         let submitBtn = null;
-
-        if (settings.submitSelector?.trim()) {
-            submitBtn = document.querySelector(settings.submitSelector);
+        if (settings.submitSelector && settings.submitSelector.trim()) {
+            try {
+                submitBtn = document.querySelector(settings.submitSelector);
+            } catch (e) {
+                console.warn('[TaskBot] Invalid submitSelector:', e.message);
+            }
         }
-
         if (!submitBtn) {
             const submitKeywords = ['submit', 'send', 'confirm', 'done', 'verify', 'ok'];
-            const buttons = getAllButtons(document.body);
-            for (const btn of buttons) {
+            const btns = getAllButtons(document.body);
+            for (const btn of btns) {
                 if (!isClickableButton(btn)) continue;
                 if (handledElements.has(btn)) continue;
                 const text = getText(btn);
@@ -714,71 +839,26 @@
                 }
             }
         }
+        storedSubmitBtn = submitBtn;
 
-        if (submitBtn && isClickableButton(submitBtn)) {
-            handledElements.add(submitBtn);
-            submitBtn.click();
+        console.log(`[TaskBot] 🧮 Captcha solved: ${captchaText} = ${answer} — HOLDING submission...`);
+
+        // ── Now decide: submit or wait for BB ──
+        if (bbCheckCompleted) {
+            finalDecision();
         } else {
-            // Fallback: simulate Enter on the input
-            simulateEnter(captchaInput);
+            console.log(`[TaskBot] ⏳ Waiting for BB check result before submitting...`);
         }
-
-        // ── Enter verification phase ──
-        // Do NOT report TASK_CLAIMED yet!
-        // Wait for a POSITIVE signal ("View Task" button) or NEGATIVE signal (error toast).
-        // Whichever appears first determines outcome.
-        isVerifyingClaim = true;
-        pendingCaptchaText = captchaText;
-        pendingCaptchaAnswer = answer;
-
-        console.log(`[TaskBot] ⏳ Captcha submitted (${captchaText} = ${answer}). Waiting for "View Task" button to confirm...`);
-
-        // Check immediately — maybe "View Task" or error is already there
-        if (detectViewTaskButton()) {
-            confirmClaimSuccess();
-            return true;
-        }
-        const immediateError = detectErrorToast();
-        if (immediateError) {
-            abortClaim(immediateError);
-            return true;
-        }
-
-        // Safety fallback timer — if neither signal appears within 5s,
-        // do a final check and decide
-        verifyTimer = setTimeout(() => {
-            verifyTimer = null;
-            if (!isVerifyingClaim) return; // already resolved
-
-            // Final check for View Task button
-            if (detectViewTaskButton()) {
-                confirmClaimSuccess();
-                return;
-            }
-
-            // Final check for error
-            const finalError = detectErrorToast();
-            if (finalError) {
-                abortClaim(finalError);
-                return;
-            }
-
-            // Neither signal found after 5s — treat as failed (conservative)
-            console.warn(`[TaskBot] ⚠️ No "View Task" button or error toast detected after 5s — treating as FAILED`);
-            abortClaim('timeout — no confirmation signal detected');
-        }, 5000);
 
         return true;
     }
 
     /**
      * Scan a subtree for elements containing simple addition expressions.
-     * Uses TreeWalker for efficiency — only visits text nodes.
      */
     function findMathElement(root) {
         if (!root) return null;
         const mathRegex = /\d+\s*\+\s*\d+/;
-
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
         while (walker.nextNode()) {
             const text = walker.currentNode.textContent.trim();
@@ -790,44 +870,46 @@
     }
 
     // ─── Notification Helper ─────────────────────────────────────────
-
     function notifyBackground(type, payload) {
         try {
-            chrome.runtime.sendMessage({ type, payload }).catch(() => { });
-        } catch {
+            chrome.runtime.sendMessage({ type, payload }).catch(function () { });
+        } catch (e) {
             // Extension context may be invalidated
         }
     }
 
     // ─── State Reset ─────────────────────────────────────────────────
-
     function resetState() {
         hasClickedAccept = false;
         hasClickedConfirm = false;
+        hasSolvedCaptcha = false;
         hasSubmittedCaptcha = false;
-        isCheckingBotBouncer = false;
         isVerifyingClaim = false;
-        pendingAcceptButton = null;
         currentSubreddit = null;
+        pendingSubreddit = null;
+        bbCheckCompleted = false;
+        bbCheckResult = true;
+        abortSubmission = false;
         pendingCaptchaText = null;
         pendingCaptchaAnswer = null;
+        storedCaptchaInput = null;
+        storedSubmitBtn = null;
 
         if (verifyTimer) {
             clearTimeout(verifyTimer);
             verifyTimer = null;
         }
+        if (bbCheckTimer) {
+            clearTimeout(bbCheckTimer);
+            bbCheckTimer = null;
+        }
     }
 
     // ─── Run Current Stage ───────────────────────────────────────────
-
-    /**
-     * Called on EVERY mutation. Runs only the current pending stage.
-     * Lightweight: each stage returns false fast if nothing found.
-     */
     function runCurrentStage() {
         if (!isEnabled) return;
-        if (isVerifyingClaim) return; // waiting for verification, don't start new actions
-        if (hasSubmittedCaptcha) return; // cycle complete, wait for reset
+        if (isVerifyingClaim) return;
+        if (hasSubmittedCaptcha) return;
 
         if (!hasClickedAccept) {
             tryAcceptTask();
@@ -839,32 +921,44 @@
             return;
         }
 
-        if (!hasSubmittedCaptcha) {
+        if (!hasSolvedCaptcha) {
             tryCaptcha();
         }
     }
 
     // ─── MutationObserver ────────────────────────────────────────────
-
     function startObserver() {
         if (observer) return;
 
-        observer = new MutationObserver((mutations) => {
+        console.log('[TaskBot] 👁️ MutationObserver STARTED — watching for tasks...');
+
+        // Push a log to background so it shows in the popup
+        notifyBackground('PUSH_LOG', {
+            level: 'info',
+            message: '👁️ Observer started — watching for tasks on ' + window.location.hostname,
+        });
+
+        observer = new MutationObserver(function (mutations) {
             if (!isEnabled) return;
 
-            // ── Check for error toasts in newly added nodes ──
-            // This runs at EVERY stage — if an error toast appears at any point
-            // (after accept, after confirm, or during verification), we abort.
+            mutationCount++;
+
+            // Log first few mutations for diagnostics
+            if (mutationCount <= 3) {
+                console.log(`[TaskBot] 📡 Mutation #${mutationCount} detected (${mutations.length} records)`);
+            }
+
+            // Check for error toasts in newly added nodes
             if (hasClickedAccept) {
                 const errorText = checkMutationsForErrorToast(mutations);
                 if (errorText) {
-                    console.warn(`[TaskBot] 🚨 Error toast detected in mutation: "${errorText}"`);
+                    console.warn(`[TaskBot] 🚨 Error toast detected: "${errorText}"`);
                     abortClaim(errorText);
-                    return; // don't proceed to any stage
+                    return;
                 }
             }
 
-            // If we're in verification phase, check for "View Task" button too
+            // If in verification phase, check for "View Task" button
             if (isVerifyingClaim) {
                 if (checkMutationsForViewTask(mutations)) {
                     confirmClaimSuccess();
@@ -873,20 +967,18 @@
             }
             if (hasSubmittedCaptcha) return;
 
-            // Run the current stage check.
             runCurrentStage();
         });
 
         observer.observe(document.body, {
             childList: true,
             subtree: true,
-            // CRITICAL: Also observe attribute changes so we catch modals
-            // that are shown/hidden via CSS class or style toggles
             attributes: true,
             attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'open'],
         });
 
-        // Scan existing DOM in case elements are already present
+        // Scan existing DOM immediately
+        console.log('[TaskBot] 🔍 Scanning existing DOM for tasks...');
         runCurrentStage();
     }
 
@@ -894,38 +986,48 @@
         if (observer) {
             observer.disconnect();
             observer = null;
+            console.log('[TaskBot] ⏹️ MutationObserver STOPPED');
         }
+        mutationCount = 0;
         resetState();
     }
 
     // ─── State Sync ──────────────────────────────────────────────────
-
     function applyState(state) {
         const wasEnabled = isEnabled;
         isEnabled = state.enabled;
+
+        console.log(`[TaskBot] 📋 State applied — enabled: ${isEnabled}, wasEnabled: ${wasEnabled}`);
 
         settings = {
             claimSelector: state.claimSelector || '',
             captchaSelector: state.captchaSelector || '',
             captchaInputSelector: state.captchaInputSelector || '',
             submitSelector: state.submitSelector || '',
-            soundEnabled: state.soundEnabled ?? true,
+            soundEnabled: state.soundEnabled !== false,
             delayMs: state.delayMs || 0,
             safeModeEnabled: state.safeModeEnabled || false,
-            botBouncerCheckEnabled: state.botBouncerCheckEnabled ?? true,
+            botBouncerCheckEnabled: state.botBouncerCheckEnabled !== false,
+            bbCheckTimeoutMs: state.bbCheckTimeoutMs || 1000,
+            bbTimeoutAction: state.bbTimeoutAction || 'submit',
+            bbCacheDurationMs: state.bbCacheDurationMs || (30 * 60 * 1000),
+            maxParallelChecks: state.maxParallelChecks || 2,
         };
 
         if (isEnabled && !wasEnabled) {
+            console.log('[TaskBot] ▶️ Enabling — starting observer...');
             resetState();
             startObserver();
         } else if (!isEnabled && wasEnabled) {
+            console.log('[TaskBot] ⏸️ Disabling — stopping observer...');
             stopObserver();
         }
     }
 
     // Listen for state updates from background
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         if (message.type === 'STATE_UPDATED') {
+            console.log('[TaskBot] 📨 Received STATE_UPDATED from background');
             applyState(message.payload);
             sendResponse({ ok: true });
         }
@@ -933,14 +1035,18 @@
     });
 
     // ─── Initialization ─────────────────────────────────────────────
-
     function init() {
-        chrome.runtime.sendMessage({ type: 'GET_STATE' }, (response) => {
+        console.log('[TaskBot] 🔧 Initializing — requesting state from background...');
+        chrome.runtime.sendMessage({ type: 'GET_STATE' }, function (response) {
             if (chrome.runtime.lastError) {
+                console.error('[TaskBot] ❌ Failed to get state:', chrome.runtime.lastError.message);
                 return;
             }
-            if (response?.state) {
+            if (response && response.state) {
+                console.log('[TaskBot] ✅ State received — enabled:', response.state.enabled);
                 applyState(response.state);
+            } else {
+                console.warn('[TaskBot] ⚠️ No state in response:', response);
             }
         });
     }

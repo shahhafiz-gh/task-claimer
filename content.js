@@ -64,6 +64,13 @@
     // Track the current subreddit being claimed for logging
     let currentSubreddit = null;
 
+    // ─── Task Queue — iterate ALL visible task cards ──────────────────
+    // Rebuilt whenever we start scanning. We walk through it in order,
+    // skipping tasks that have already been handled (WeakSet).
+    let taskQueue = [];        // Array of Accept-Task buttons found on page
+    let taskQueueIndex = 0;   // Index of the next task to try
+    let isAdvancing = false;  // guard against re-entrant advanceToNextTask
+
     // ─── Local Subreddit Safety Cache ────────────────────────────────
     // key: subreddit (lowercase), value: { safe: boolean, timestamp: number }
     const subredditCache = new Map();
@@ -107,6 +114,16 @@
         'task was claimed',
         'unable to claim',
         'cannot claim',
+        // Comment/reply/post not found — earntask.io throws these as toast errors
+        'comment not found',
+        'reply not found',
+        'post not found',
+        'post deleted',
+        'not found',
+        'no longer exists',
+        'does not exist',
+        'content removed',
+        'deleted',
     ];
 
     /**
@@ -212,6 +229,8 @@
 
         isVerifyingClaim = false;
         resetState();
+        // Move on to the next task in queue instead of stopping
+        advanceToNextTask();
     }
 
     /**
@@ -241,6 +260,8 @@
 
         isVerifyingClaim = false;
         resetState();
+        // Move on to the next task in queue
+        advanceToNextTask();
     }
 
     // ─── View Task Detection (Positive Success Signal) ───────────────
@@ -603,32 +624,91 @@
         }, 5000);
     }
 
-    // ─── Stage A: Accept Task (IMMEDIATE — no BB wait) ───────────────
-    function tryAcceptTask() {
-        if (hasClickedAccept) return false;
-
-        let targetButton = null;
+    // ─── Task Queue Management ────────────────────────────────────────
+    /**
+     * Rebuild the task queue by scanning ALL visible "Accept Task" buttons.
+     * Skips buttons already in `handledElements`.
+     */
+    function rebuildTaskQueue() {
+        taskQueue = [];
+        taskQueueIndex = 0;
         const buttons = getAllButtons(document.body);
         for (const btn of buttons) {
             if (handledElements.has(btn)) continue;
             if (!isClickableButton(btn)) continue;
             const text = getText(btn);
             if (text.includes('accept') && text.includes('task')) {
-                targetButton = btn;
-                break;
+                taskQueue.push(btn);
             }
         }
-
-        // Also try user-configured selector
-        if (!targetButton && settings.claimSelector && settings.claimSelector.trim()) {
+        // Also include buttons matched by user-configured selector
+        if (settings.claimSelector && settings.claimSelector.trim()) {
             try {
-                const btn = document.querySelector(settings.claimSelector);
-                if (btn && isClickableButton(btn) && !handledElements.has(btn)) {
-                    targetButton = btn;
+                const matched = document.querySelectorAll(settings.claimSelector);
+                for (const btn of matched) {
+                    if (!handledElements.has(btn) && isClickableButton(btn) && !taskQueue.includes(btn)) {
+                        taskQueue.push(btn);
+                    }
                 }
             } catch (e) {
                 console.warn('[TaskBot] Invalid claimSelector:', e.message);
             }
+        }
+        console.log(`[TaskBot] 🗂️ Task queue rebuilt — ${taskQueue.length} task(s) found`);
+    }
+
+    /**
+     * Advance to the next task in the queue without rebuilding it.
+     * Called after a failed/aborted claim so the bot tries the next card.
+     */
+    function advanceToNextTask() {
+        if (isAdvancing) return;
+        isAdvancing = true;
+
+        // Small delay so the page can settle (toast disappears, modal closes)
+        setTimeout(function () {
+            isAdvancing = false;
+            if (!isEnabled) return;
+
+            taskQueueIndex++;
+
+            // If we have more tasks in the current queue, try the next one
+            if (taskQueueIndex < taskQueue.length) {
+                console.log(`[TaskBot] ➡️ Advancing to task #${taskQueueIndex + 1} of ${taskQueue.length}`);
+                runCurrentStage();
+            } else {
+                // Queue exhausted — do a fresh scan in case new cards loaded
+                console.log(`[TaskBot] 🔄 Task queue exhausted — rebuilding...`);
+                rebuildTaskQueue();
+                if (taskQueue.length > 0) {
+                    console.log(`[TaskBot] ➡️ Fresh scan found ${taskQueue.length} task(s)`);
+                    runCurrentStage();
+                } else {
+                    console.log(`[TaskBot] 💤 No more tasks available. Waiting for new ones...`);
+                }
+            }
+        }, 800); // 800 ms grace period
+    }
+
+    // ─── Stage A: Accept Task (IMMEDIATE — no BB wait) ───────────────
+    function tryAcceptTask() {
+        if (hasClickedAccept) return false;
+
+        // On the very first call (or after queue exhausted), build the queue
+        if (taskQueue.length === 0 || taskQueueIndex >= taskQueue.length) {
+            rebuildTaskQueue();
+        }
+
+        // Walk from the current index to find the next unhandled, clickable button
+        let targetButton = null;
+        while (taskQueueIndex < taskQueue.length) {
+            const candidate = taskQueue[taskQueueIndex];
+            if (!handledElements.has(candidate) && isClickableButton(candidate)) {
+                targetButton = candidate;
+                break;
+            }
+            // Already handled or gone — skip
+            taskQueueIndex++;
         }
 
         if (!targetButton) return false;
@@ -879,6 +959,10 @@
     }
 
     // ─── State Reset ─────────────────────────────────────────────────
+    /**
+     * Reset per-task claim state but deliberately KEEP the taskQueue and
+     * taskQueueIndex so advanceToNextTask() can continue from where we left off.
+     */
     function resetState() {
         hasClickedAccept = false;
         hasClickedConfirm = false;
@@ -903,6 +987,7 @@
             clearTimeout(bbCheckTimer);
             bbCheckTimer = null;
         }
+        // NOTE: taskQueue, taskQueueIndex, isAdvancing are intentionally NOT reset here
     }
 
     // ─── Run Current Stage ───────────────────────────────────────────
@@ -989,6 +1074,10 @@
             console.log('[TaskBot] ⏹️ MutationObserver STOPPED');
         }
         mutationCount = 0;
+        // Full reset including task queue when bot is disabled
+        taskQueue = [];
+        taskQueueIndex = 0;
+        isAdvancing = false;
         resetState();
     }
 

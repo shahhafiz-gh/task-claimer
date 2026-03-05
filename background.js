@@ -71,44 +71,110 @@ function addBBLog(entry) {
   });
 }
 
-// ─── BotBouncer In-Memory Cache ───────────────────────────────────
+// ─── BotBouncer In-Memory Cache (hot-path within a SW session) ────
+// This is a fast short-circuit. Chrome can kill and restart the service
+// worker at any time, so we ALWAYS back reads up with chrome.storage.local.
 const botBouncerCache = new Map();
 
-// ─── Request Queue System ─────────────────────────────────────────
+// ─── Request Deduplication Queue ──────────────────────────────────
+// Prevents firing duplicate API calls for the same subreddit at the same time.
 const pendingChecks = new Map();  // subreddit -> [resolve callbacks]
 let activeChecks = 0;
 let maxParallel = 2;
 
 /**
- * Queue a BotBouncer check. Deduplicates requests for the same subreddit.
+ * Read a subreddit's cached result.
+ * Checks in-memory first (fast), then chrome.storage.local (persistent).
+ * Returns { safe, timestamp } if a valid (non-expired) entry exists, or null.
  */
-function queueBotBouncerCheck(subreddit, timeoutMs, cacheTtlMs) {
+function readCacheEntry(key, cacheTtlMs) {
+  return new Promise((resolve) => {
+    // 1. Hot-path: in-memory map (within the same SW session)
+    const mem = botBouncerCache.get(key);
+    if (mem && (Date.now() - mem.timestamp) < cacheTtlMs) {
+      resolve(mem);
+      return;
+    }
+
+    // 2. Cold-path: chrome.storage.local (survives SW restart)
+    chrome.storage.local.get('bbCache', ({ bbCache }) => {
+      const disk = (bbCache || {})[key];
+      if (disk && (Date.now() - disk.timestamp) < cacheTtlMs) {
+        // Warm the in-memory cache while we're at it
+        botBouncerCache.set(key, disk);
+        resolve(disk);
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+/**
+ * Persist a cache entry to BOTH in-memory and chrome.storage.local.
+ * Called for every completed check, whether safe or unsafe.
+ */
+function writeCacheEntry(key, safe) {
+  const entry = { safe, timestamp: Date.now() };
+
+  // In-memory hot cache
+  botBouncerCache.set(key, entry);
+
+  // Persistent storage
+  chrome.storage.local.get('bbCache', ({ bbCache }) => {
+    const cache = bbCache || {};
+    cache[key] = entry;
+
+    // Prune to most-recent 500 entries to avoid bloat
+    const entries = Object.entries(cache);
+    if (entries.length > 500) {
+      entries.sort((a, b) => b[1].timestamp - a[1].timestamp);
+      chrome.storage.local.set({ bbCache: Object.fromEntries(entries.slice(0, 500)) });
+    } else {
+      chrome.storage.local.set({ bbCache: cache });
+    }
+  });
+}
+
+/**
+ * Queue a BotBouncer check.
+ * - Checks persistent cache first (no API call if already known).
+ * - Deduplicates concurrent requests for the same subreddit.
+ * - Caches ALL results (safe AND unsafe) so future tasks skip the API call.
+ */
+async function queueBotBouncerCheck(subreddit, timeoutMs, cacheTtlMs) {
   const key = subreddit.toLowerCase();
 
-  // Check cache first
-  const cached = botBouncerCache.get(key);
-  if (cached && (Date.now() - cached.timestamp) < cacheTtlMs) {
-    const msg = `Cache hit for r/${subreddit}: ${cached.safe ? 'SAFE ✓' : 'UNSAFE ✗'}`;
-    console.log(`[BotBouncer] ${msg}`);
-    addLog('info', `🔄 ${msg}`);
-    return Promise.resolve({ safe: cached.safe, cached: true });
+  // ── 1. Cache check (memory + storage) ─────────────────────
+  const cached = await readCacheEntry(key, cacheTtlMs);
+  if (cached) {
+    const label = cached.safe ? 'SAFE ✓' : 'UNSAFE ✗';
+    const msg = `Cache hit for r/${subreddit}: ${label} (no API call needed)`;
+    console.log(`[BotBouncer] 📂 ${msg}`);
+    addLog('info', `📂 ${msg}`);
+    return { safe: cached.safe, cached: true };
   }
 
-  // Deduplicate: if already checking this subreddit, piggyback
+  // ── 2. Deduplication: if already in-flight, wait for it ───
   if (pendingChecks.has(key)) {
+    console.log(`[BotBouncer] ⏳ Piggybacking on in-flight check for r/${subreddit}`);
     return new Promise((resolve) => {
       pendingChecks.get(key).push(resolve);
     });
   }
 
+  // ── 3. New live API check ──────────────────────────────────
   return new Promise((resolve) => {
     pendingChecks.set(key, [resolve]);
-    processQueue(key, subreddit, timeoutMs, cacheTtlMs);
+    processCheck(key, subreddit, timeoutMs, cacheTtlMs);
   });
 }
 
-async function processQueue(key, subreddit, timeoutMs, cacheTtlMs) {
-  // Wait if at max capacity
+/**
+ * Execute the live API check (respects the maxParallel concurrency limit).
+ */
+async function processCheck(key, subreddit, timeoutMs, cacheTtlMs) {
+  // Wait if at max concurrency
   while (activeChecks >= maxParallel) {
     await new Promise(r => setTimeout(r, 50));
   }
@@ -118,27 +184,20 @@ async function processQueue(key, subreddit, timeoutMs, cacheTtlMs) {
   try {
     const result = await fetchBotBouncerCheck(subreddit, timeoutMs);
 
-    // Cache the result
-    botBouncerCache.set(key, { safe: result.safe, timestamp: Date.now() });
-
-    // Also persist to chrome.storage for cross-session persistence
-    persistCacheEntry(key, result.safe);
+    // ── Always cache the result — safe OR unsafe ──
+    writeCacheEntry(key, result.safe);
 
     // Resolve all waiting callbacks
     const callbacks = pendingChecks.get(key) || [];
-    for (const cb of callbacks) {
-      cb(result);
-    }
+    for (const cb of callbacks) cb(result);
     pendingChecks.delete(key);
   } catch (err) {
-    const result = { safe: false, cached: false, error: err.message };
-    botBouncerCache.set(key, { safe: false, timestamp: Date.now() });
-    persistCacheEntry(key, false);
+    // On hard error, cache as unsafe so we don't hammer the API
+    writeCacheEntry(key, false);
 
+    const result = { safe: false, cached: false, error: err.message };
     const callbacks = pendingChecks.get(key) || [];
-    for (const cb of callbacks) {
-      cb(result);
-    }
+    for (const cb of callbacks) cb(result);
     pendingChecks.delete(key);
   } finally {
     activeChecks--;
@@ -146,39 +205,10 @@ async function processQueue(key, subreddit, timeoutMs, cacheTtlMs) {
 }
 
 /**
- * Persist a cache entry to chrome.storage.local for cross-session persistence.
+ * REMOVED: loadPersistentCache() — no longer needed.
+ * Cache is now read on-demand from chrome.storage.local per check,
+ * so service-worker restarts never cause spurious API calls.
  */
-function persistCacheEntry(key, safe) {
-  chrome.storage.local.get('bbCache', ({ bbCache }) => {
-    const cache = bbCache || {};
-    cache[key] = { safe, timestamp: Date.now() };
-    // Prune old entries (keep last 500)
-    const entries = Object.entries(cache);
-    if (entries.length > 500) {
-      entries.sort((a, b) => b[1].timestamp - a[1].timestamp);
-      const pruned = Object.fromEntries(entries.slice(0, 500));
-      chrome.storage.local.set({ bbCache: pruned });
-    } else {
-      chrome.storage.local.set({ bbCache: cache });
-    }
-  });
-}
-
-/**
- * Load persistent cache into memory on startup.
- */
-function loadPersistentCache(cacheTtlMs) {
-  chrome.storage.local.get('bbCache', ({ bbCache }) => {
-    if (!bbCache) return;
-    const now = Date.now();
-    for (const [key, val] of Object.entries(bbCache)) {
-      if ((now - val.timestamp) < cacheTtlMs) {
-        botBouncerCache.set(key, val);
-      }
-    }
-    console.log(`[BotBouncer] Loaded ${botBouncerCache.size} cached entries from storage`);
-  });
-}
 
 /**
  * Actual fetch to Reddit API.
@@ -228,8 +258,11 @@ async function fetchBotBouncerCheck(subreddit, timeoutMs = 5000) {
   }
 }
 
-// ─── Load persistent cache on startup ─────────────────────────────
-loadPersistentCache(DEFAULT_STATE.bbCacheDurationMs);
+// ─── Startup ──────────────────────────────────────────────────────
+// No need to pre-load the cache on startup — readCacheEntry() reads
+// chrome.storage.local on demand, so a cold SW restart won't cause
+// unnecessary API calls.
+console.log('[BotBouncer] 🚀 Background service worker started. Cache is read on-demand from storage.');
 
 // Initialize state on install
 chrome.runtime.onInstalled.addListener(() => {
@@ -341,17 +374,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case 'GET_BB_CACHE_STATS': {
-      const stats = {
-        entries: botBouncerCache.size,
-        safeCount: 0,
-        unsafeCount: 0,
-      };
-      for (const [, val] of botBouncerCache) {
-        if (val.safe) stats.safeCount++;
-        else stats.unsafeCount++;
-      }
-      sendResponse({ stats });
-      return false;
+      // Count entries from persistent storage for accurate stats
+      chrome.storage.local.get('bbCache', ({ bbCache }) => {
+        const cache = bbCache || {};
+        const now = Date.now();
+        const cacheTtlMs = DEFAULT_STATE.bbCacheDurationMs;
+        let safe = 0, unsafe = 0, expired = 0;
+        for (const val of Object.values(cache)) {
+          if ((now - val.timestamp) >= cacheTtlMs) { expired++; continue; }
+          if (val.safe) safe++; else unsafe++;
+        }
+        sendResponse({
+          stats: {
+            entries: safe + unsafe,
+            safeCount: safe,
+            unsafeCount: unsafe,
+            expiredCount: expired,
+            totalStored: Object.keys(cache).length,
+          },
+        });
+      });
+      return true;
     }
 
     case 'STAGE_ACCEPT':

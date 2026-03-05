@@ -71,12 +71,9 @@
     let taskQueueIndex = 0;   // Index of the next task to try
     let isAdvancing = false;  // guard against re-entrant advanceToNextTask
 
-    // ─── Local Subreddit Safety Cache ────────────────────────────────
-    // key: subreddit (lowercase), value: { safe: boolean, timestamp: number }
-    const subredditCache = new Map();
-
     // Mutation counter for diagnostics
     let mutationCount = 0;
+
 
     let settings = {
         claimSelector: '',
@@ -425,26 +422,6 @@
         return null;
     }
 
-    // ─── Local Cache Check ───────────────────────────────────────────
-    function checkLocalCache(subreddit) {
-        const key = subreddit.toLowerCase();
-        const cached = subredditCache.get(key);
-        if (cached && (Date.now() - cached.timestamp) < settings.bbCacheDurationMs) {
-            return { safe: cached.safe, cached: true };
-        }
-        if (cached) {
-            subredditCache.delete(key);
-        }
-        return null;
-    }
-
-    function updateLocalCache(subreddit, safe) {
-        subredditCache.set(subreddit.toLowerCase(), {
-            safe,
-            timestamp: Date.now(),
-        });
-    }
-
     // ─── BotBouncer Background Check (Fire & Forget) ─────────────────
     function fireBBCheck(subreddit) {
         console.log(`[BotBouncer] 🔍 Firing parallel check for r/${subreddit}...`);
@@ -475,9 +452,7 @@
     }
 
     function handleBBResult(subreddit, safe, error) {
-        updateLocalCache(subreddit, safe);
-
-        // ── Always log the BB result so the BB Logs panel updates from "Pending" ──
+        // ── Log the result so the BB Logs panel updates from "Pending" ──
         notifyBackground('BB_LOG_ENTRY', {
             subreddit,
             status: safe ? 'safe' : 'unsafe',
@@ -729,44 +704,34 @@
             subreddit: subreddit || 'unknown',
         });
 
-        // ── Fire parallel BB check (if enabled) ──
+        // ── Fire BB check (if enabled) — background checks its own persistent
+        //    cache first, so no API call is made for already-known subreddits ──
         if (settings.botBouncerCheckEnabled && subreddit) {
-            const cached = checkLocalCache(subreddit);
-            if (cached) {
-                console.log(`[BotBouncer] 📋 Cache hit for r/${subreddit}: ${cached.safe ? 'SAFE' : 'UNSAFE'}`);
-                bbCheckCompleted = true;
-                bbCheckResult = cached.safe;
-                if (!cached.safe) {
+            // Always delegate to background — it checks chrome.storage.local before API
+            fireBBCheck(subreddit);
+
+            // Safety timeout: if BB check takes too long, ABORT (never submit)
+            bbCheckTimer = setTimeout(function () {
+                bbCheckTimer = null;
+                if (!bbCheckCompleted) {
+                    console.warn(`[BotBouncer] ⏱️ STRICT: Check timed out after ${settings.bbCheckTimeoutMs}ms — will ABORT if captcha solved`);
+                    // Force abort — mark as unsafe so any pending/future finalDecision aborts
+                    bbCheckCompleted = true;
+                    bbCheckResult = false;  // NOT safe
                     abortSubmission = true;
-                }
-            } else {
-                // BB check NOT cached — must wait for result
-                // bbCheckCompleted stays FALSE until handleBBResult is called
-                fireBBCheck(subreddit);
 
-                // Safety timeout: if BB check takes too long, ABORT (never submit)
-                bbCheckTimer = setTimeout(function () {
-                    bbCheckTimer = null;
-                    if (!bbCheckCompleted) {
-                        console.warn(`[BotBouncer] ⏱️ STRICT: Check timed out after ${settings.bbCheckTimeoutMs}ms — will ABORT if captcha solved`);
-                        // Force abort — mark as unsafe so any pending/future finalDecision aborts
-                        bbCheckCompleted = true;
-                        bbCheckResult = false;  // NOT safe
-                        abortSubmission = true;
+                    notifyBackground('BB_LOG_ENTRY', {
+                        subreddit: subreddit,
+                        status: 'timeout',
+                        action: 'marked_unsafe_on_timeout',
+                    });
 
-                        notifyBackground('BB_LOG_ENTRY', {
-                            subreddit: subreddit,
-                            status: 'timeout',
-                            action: 'marked_unsafe_on_timeout',
-                        });
-
-                        // If captcha is already solved and waiting, trigger abort
-                        if (hasSolvedCaptcha && !hasSubmittedCaptcha) {
-                            finalDecision(); // will abort because abortSubmission=true
-                        }
+                    // If captcha is already solved and waiting, trigger abort
+                    if (hasSolvedCaptcha && !hasSubmittedCaptcha) {
+                        finalDecision(); // will abort because abortSubmission=true
                     }
-                }, settings.bbCheckTimeoutMs);
-            }
+                }
+            }, settings.bbCheckTimeoutMs);
         } else if (settings.botBouncerCheckEnabled && !subreddit) {
             // STRICT: Cannot proceed without knowing the subreddit — mark as UNSAFE
             console.warn('[BotBouncer] ⛔ STRICT: Could not extract subreddit — treating as UNSAFE');

@@ -398,6 +398,18 @@
         }
 
         resetState();
+
+        // Automatically navigate back to the tasks list after 1 second
+        setTimeout(() => {
+            const tasksLink = document.querySelector('nav a[href="/tasks"]') || document.querySelector('a[href="/tasks"]');
+            if (tasksLink) {
+                console.log('[TaskBot] 🔄 Redirecting to active tasks list...');
+                tasksLink.click();
+            } else {
+                console.log('[TaskBot] 🔄 Tasks link not found in navbar, navigating directly...');
+                window.location.href = '/tasks';
+            }
+        }, 1000);
     }
 
     // ─── Captcha Solver ──────────────────────────────────────────────

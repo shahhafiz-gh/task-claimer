@@ -232,7 +232,7 @@
 
     /**
      * Silently abort — used when BB detects unsafe subreddit.
-     * Don't submit anything, let the task expire naturally.
+     * Clicks Cancel in any open confirmation modal, then moves to next task.
      */
     function silentAbort(subreddit) {
         console.warn(`[TaskBot] 🛡️ Silent abort — r/${subreddit} has BotBouncer`);
@@ -255,44 +255,118 @@
             action: 'skipped',
         });
 
-        isVerifyingClaim = false;
-        resetState();
-        // Move on to the next task in queue
-        advanceToNextTask();
+        // ── Click Cancel/No to dismiss any open confirmation dialog ──
+        clickCancelButton().then(() => {
+            isVerifyingClaim = false;
+            resetState();
+            // Move on to the next task in queue
+            advanceToNextTask();
+        });
+    }
+
+    /**
+     * Find and click the Cancel / No / Close button in any open modal or dialog.
+     * Called during silentAbort so the confirmation dialog is cleanly dismissed
+     * before the bot moves on to the next task card.
+     */
+    function clickCancelButton(maxRetries = 10, intervalMs = 200) {
+        return new Promise((resolve) => {
+            let attempt = 0;
+
+            function tryClick() {
+                // Priority 1: look inside a visible modal/dialog first
+                const MODAL_SELECTORS = [
+                    '[role="dialog"]', '[role="alertdialog"]',
+                    '.modal', '.dialog', '.popup', '.overlay',
+                    '[class*="modal"]', '[class*="dialog"]',
+                    '[class*="popup"]', '[class*="confirm"]',
+                ];
+
+                const CANCEL_TEXT = ['cancel', 'no', 'close', 'dismiss', 'deny', 'back'];
+
+                // Try inside modals first
+                for (const modalSel of MODAL_SELECTORS) {
+                    let modals;
+                    try { modals = document.querySelectorAll(modalSel); } catch (e) { continue; }
+                    for (const modal of modals) {
+                        try {
+                            const style = window.getComputedStyle(modal);
+                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                        } catch (e) { continue; }
+
+                        const btns = modal.querySelectorAll('button, [role="button"]');
+                        for (const btn of btns) {
+                            if (!isClickableButton(btn)) continue;
+                            const text = getText(btn);
+                            if (CANCEL_TEXT.includes(text) || CANCEL_TEXT.some(t => text.startsWith(t))) {
+                                console.log(`[TaskBot] 🚫 Clicking Cancel in modal: "${getText(btn)}"`);
+                                handledElements.add(btn);
+                                btn.click();
+                                return true; // done
+                            }
+                        }
+                    }
+                }
+
+                // Priority 2: fall back to any visible cancel-like button on the page
+                const allBtns = getAllButtons(document.body);
+                for (const btn of allBtns) {
+                    if (handledElements.has(btn)) continue;
+                    if (!isClickableButton(btn)) continue;
+                    const text = getText(btn);
+                    if (CANCEL_TEXT.includes(text) || CANCEL_TEXT.some(t => text.startsWith(t))) {
+                        console.log(`[TaskBot] 🚫 Clicking Cancel (page-level): "${getText(btn)}"`);
+                        handledElements.add(btn);
+                        btn.click();
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            function attemptLoop() {
+                if (tryClick()) {
+                    resolve(true);
+                } else {
+                    attempt++;
+                    if (attempt < maxRetries) {
+                        setTimeout(attemptLoop, intervalMs);
+                    } else {
+                        console.log(`[TaskBot] ℹ️ No Cancel button found to click after ${maxRetries} attempts — modal may not be open yet.`);
+                        resolve(false);
+                    }
+                }
+            }
+
+            attemptLoop();
+        });
     }
 
     // ─── View Task Detection (Positive Success Signal) ───────────────
-    function detectViewTaskButton() {
-        const buttons = getAllButtons(document.body);
-        for (const btn of buttons) {
-            if (!isClickableButton(btn)) continue;
-            const text = getText(btn);
-            if (text.includes('view') && text.includes('task')) {
-                return true;
-            }
+    const SUCCESS_TEXTS = [
+        'task accepted with this account',
+        "you've already accepted this task"
+    ];
+
+    function detectSuccessSignal() {
+        // 1. Check for success text on the page directly
+        const bodyText = (document.body.textContent || '').toLowerCase();
+        for (const st of SUCCESS_TEXTS) {
+            if (bodyText.includes(st)) return true;
         }
-        const links = document.querySelectorAll('a');
-        for (const link of links) {
-            const text = getText(link);
-            if (text.includes('view') && text.includes('task')) {
-                try {
-                    const style = window.getComputedStyle(link);
-                    if (style.display !== 'none' && style.visibility !== 'hidden') {
-                        return true;
-                    }
-                } catch (e) { /* ignore */ }
-            }
-        }
+
         return false;
     }
 
-    function checkMutationsForViewTask(mutations) {
+    function checkMutationsForSuccessSignal(mutations) {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (node.nodeType !== Node.ELEMENT_NODE) continue;
                 const text = (node.textContent || '').toLowerCase().trim();
-                if (text.includes('view') && text.includes('task')) {
-                    return true;
+
+                for (const st of SUCCESS_TEXTS) {
+                    if (text.includes(st)) return true;
                 }
             }
         }
@@ -406,19 +480,49 @@
                 searchRoot = searchRoot.parentElement;
             }
         }
+
+        // 1. Look for explicit links containing /r/ (e.g., href="https://old.reddit.com/r/startups")
         const links = searchRoot.querySelectorAll('a[href*="/r/"]');
         for (const link of links) {
             const match = link.href.match(subredditRegex);
             if (match) return match[1].toLowerCase();
         }
+
+        // 2. Check individual leaf nodes to avoid textContent concatenation issues 
+        // (e.g. <span>Reddit Post</span><span>r/startups</span> becomes "Reddit Postr/startups")
+        const allElements = searchRoot.querySelectorAll('*');
+        for (const el of allElements) {
+            if (el.children.length === 0) {
+                const text = (el.textContent || '').trim();
+                // Match exact "r/subreddit" or containing spaces " r/subreddit "
+                const match = text.match(/(?:^|\s)r\/([a-zA-Z0-9_]+)(?:\s|$)/i);
+                if (match) return match[1].toLowerCase();
+            }
+        }
+
+        // 3. Look at innerHTML to easily find >r/subreddit< regardless of element structure
+        const innerHTML = searchRoot.innerHTML || '';
+        const htmlMatch = innerHTML.match(/(?:>|\s|'|")r\/([a-zA-Z0-9_]+)(?=<|\s|'|")/i);
+        if (htmlMatch) return htmlMatch[1].toLowerCase();
+
+        // 4. Fallback: full textContent with boundaries
         const textContent = searchRoot.textContent || '';
         const textMatch = textContent.match(/\br\/([a-zA-Z0-9_]+)\b/i);
         if (textMatch) return textMatch[1].toLowerCase();
+
+        // 5. Fallback: very permissive regex, look for anything that looks like "r/subreddit" 
+        // that's preceded by non-word characters or lowercased words accidentally mashed.
+        // We use {3,21} as reasonably sized subreddit names to prevent false positives.
+        const blindTextMatch = textContent.match(/r\/([a-zA-Z0-9_]{3,21})/i);
+        if (blindTextMatch) return blindTextMatch[1].toLowerCase();
+
+        // 6. Global sweep of all links on page if everything else fails
         const allLinks = document.querySelectorAll('a[href*="/r/"]');
         for (const link of allLinks) {
             const match = link.href.match(subredditRegex);
             if (match) return match[1].toLowerCase();
         }
+
         return null;
     }
 
@@ -578,7 +682,7 @@
         isVerifyingClaim = true;
         console.log(`[TaskBot] ⏳ Captcha submitted (${pendingCaptchaText} = ${pendingCaptchaAnswer}). Waiting for "View Task" to confirm...`);
 
-        if (detectViewTaskButton()) {
+        if (detectSuccessSignal()) {
             confirmClaimSuccess();
             return;
         }
@@ -591,7 +695,7 @@
         verifyTimer = setTimeout(() => {
             verifyTimer = null;
             if (!isVerifyingClaim) return;
-            if (detectViewTaskButton()) { confirmClaimSuccess(); return; }
+            if (detectSuccessSignal()) { confirmClaimSuccess(); return; }
             const finalError = detectErrorToast();
             if (finalError) { abortClaim(finalError); return; }
             console.warn(`[TaskBot] ⚠️ No confirmation signal after 5s — treating as FAILED`);
@@ -1008,9 +1112,9 @@
                 }
             }
 
-            // If in verification phase, check for "View Task" button
+            // If in verification phase, check for success signals
             if (isVerifyingClaim) {
-                if (checkMutationsForViewTask(mutations)) {
+                if (checkMutationsForSuccessSignal(mutations)) {
                     confirmClaimSuccess();
                 }
                 return;

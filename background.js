@@ -19,23 +19,21 @@ const DEFAULT_STATE = {
   lastSkippedSubreddit: null,
   lastStage: null,
   lastStageTimestamp: 0,
-  // Configurable settings
+  // Configurable selectors
   claimSelector: '',
   captchaSelector: '',
   captchaInputSelector: '',
   submitSelector: '',
+  // UI settings
   soundEnabled: true,
   delayMs: 0,
   safeModeEnabled: false,
+  // BotBouncer settings
   botBouncerCheckEnabled: true,
-  // NEW: Parallel flow settings
-  bbCheckTimeoutMs: 10000,         // max wait before fallback (10s — strict)
-  bbTimeoutAction: 'abort',        // STRICT: always abort on timeout
-  bbCacheDurationMs: 30 * 60 * 1000,  // 30 minutes
+  bbCheckTimeoutMs: 10000,
+  bbTimeoutAction: 'abort',
+  bbCacheDurationMs: 30 * 60 * 1000,
   maxParallelChecks: 2,
-  showBBLogs: true,
-  botBouncerCacheTtlMs: 30 * 60 * 1000,
-  botBouncerTimeoutMs: 2000,
 };
 
 // ─── Activity Log System ──────────────────────────────────────────
@@ -327,8 +325,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       chrome.storage.local.get('state', ({ state }) => {
         const s = state || DEFAULT_STATE;
-        const timeoutMs = s.botBouncerTimeoutMs || 5000;
-        const cacheTtlMs = s.bbCacheDurationMs || s.botBouncerCacheTtlMs || 1800000;
+        const timeoutMs = s.bbCheckTimeoutMs || 5000;
+        const cacheTtlMs = s.bbCacheDurationMs || 1800000;
 
         queueBotBouncerCheck(subreddit, timeoutMs, cacheTtlMs)
           .then((result) => {

@@ -64,12 +64,39 @@
     // Track the current subreddit being claimed for logging
     let currentSubreddit = null;
 
-    // ─── Local Subreddit Safety Cache ────────────────────────────────
-    // key: subreddit (lowercase), value: { safe: boolean, timestamp: number }
-    const subredditCache = new Map();
+    // ─── Deferred Notifications Queue ─────────────────────────────────
+    // During the hot path (accept → confirm → captcha → submit),
+    // ALL logs and background messages are queued here and flushed
+    // only AFTER the claim succeeds or fails. Zero overhead during claiming.
+    let deferredQueue = [];
+
+    function deferNotify(type, payload) {
+        deferredQueue.push({ type, payload });
+    }
+
+    function deferLog(msg) {
+        deferredQueue.push({ type: 'PUSH_LOG', payload: { level: 'info', message: msg } });
+    }
+
+    function flushDeferred() {
+        const queue = deferredQueue;
+        deferredQueue = [];
+        // Fire all deferred messages asynchronously — no blocking
+        for (const item of queue) {
+            notifyBackground(item.type, item.payload);
+        }
+    }
+
+    // ─── Task Queue — iterate ALL visible task cards ──────────────────
+    // Rebuilt whenever we start scanning. We walk through it in order,
+    // skipping tasks that have already been handled (WeakSet).
+    let taskQueue = [];        // Array of Accept-Task buttons found on page
+    let taskQueueIndex = 0;   // Index of the next task to try
+    let isAdvancing = false;  // guard against re-entrant advanceToNextTask
 
     // Mutation counter for diagnostics
     let mutationCount = 0;
+
 
     let settings = {
         claimSelector: '',
@@ -77,10 +104,9 @@
         captchaInputSelector: '',
         submitSelector: '',
         soundEnabled: true,
-        delayMs: 0,
         safeModeEnabled: false,
         botBouncerCheckEnabled: true,
-        bbCheckTimeoutMs: 10000,     // max wait for BB check (10s — generous, always aborts on timeout)
+        bbCheckTimeoutMs: 3000,      // max wait for BB check (3s — fast, aborts on timeout)
         bbTimeoutAction: 'abort',    // STRICT: always abort on timeout, never submit without green signal
         bbCacheDurationMs: 30 * 60 * 1000, // 30 minutes
         maxParallelChecks: 2,
@@ -107,6 +133,16 @@
         'task was claimed',
         'unable to claim',
         'cannot claim',
+        // Comment/reply/post not found — earntask.io throws these as toast errors
+        'comment not found',
+        'reply not found',
+        'post not found',
+        'post deleted',
+        'not found',
+        'no longer exists',
+        'does not exist',
+        'content removed',
+        'deleted',
     ];
 
     /**
@@ -194,8 +230,6 @@
 
     // ─── Abort Claim ─────────────────────────────────────────────────
     function abortClaim(reason) {
-        console.warn(`[TaskBot] ❌ ABORT — ${reason}`);
-
         if (verifyTimer) {
             clearTimeout(verifyTimer);
             verifyTimer = null;
@@ -205,22 +239,25 @@
             bbCheckTimer = null;
         }
 
-        notifyBackground('TASK_CLAIM_FAILED', {
-            reason,
-            subreddit: currentSubreddit,
-        });
-
+        // Flush deferred logs + send failure notification AFTER clearing state
+        const sub = currentSubreddit;
         isVerifyingClaim = false;
         resetState();
+
+        // Now do the non-critical work
+        console.warn(`[TaskBot] ❌ ABORT — ${reason}`);
+        notifyBackground('TASK_CLAIM_FAILED', { reason, subreddit: sub });
+        flushDeferred();
+
+        // Move on to the next task in queue instead of stopping
+        advanceToNextTask();
     }
 
     /**
      * Silently abort — used when BB detects unsafe subreddit.
-     * Don't submit anything, let the task expire naturally.
+     * Clicks Cancel in any open confirmation modal, then moves to next task.
      */
     function silentAbort(subreddit) {
-        console.warn(`[TaskBot] 🛡️ Silent abort — r/${subreddit} has BotBouncer`);
-
         if (verifyTimer) {
             clearTimeout(verifyTimer);
             verifyTimer = null;
@@ -230,51 +267,125 @@
             bbCheckTimer = null;
         }
 
-        notifyBackground('TASK_SKIPPED_BOTBOUNCER', { subreddit });
+        // ── Click Cancel/No to dismiss any open confirmation dialog ──
+        clickCancelButton().then(() => {
+            isVerifyingClaim = false;
+            resetState();
 
-        // Log BB result
-        notifyBackground('BB_LOG_ENTRY', {
-            subreddit,
-            status: 'unsafe',
-            action: 'skipped',
+            // Non-critical work AFTER state is cleared
+            console.warn(`[TaskBot] 🛡️ Silent abort — r/${subreddit} has BotBouncer`);
+            notifyBackground('TASK_SKIPPED_BOTBOUNCER', { subreddit });
+            notifyBackground('BB_LOG_ENTRY', { subreddit, status: 'unsafe', action: 'skipped' });
+            flushDeferred();
+
+            // Move on to the next task in queue
+            advanceToNextTask();
         });
+    }
 
-        isVerifyingClaim = false;
-        resetState();
+    /**
+     * Find and click the Cancel / No / Close button in any open modal or dialog.
+     * Called during silentAbort so the confirmation dialog is cleanly dismissed
+     * before the bot moves on to the next task card.
+     */
+    function clickCancelButton(maxRetries = 5, intervalMs = 100) {
+        return new Promise((resolve) => {
+            let attempt = 0;
+
+            function tryClick() {
+                // Priority 1: look inside a visible modal/dialog first
+                const MODAL_SELECTORS = [
+                    '[role="dialog"]', '[role="alertdialog"]',
+                    '.modal', '.dialog', '.popup', '.overlay',
+                    '[class*="modal"]', '[class*="dialog"]',
+                    '[class*="popup"]', '[class*="confirm"]',
+                ];
+
+                const CANCEL_TEXT = ['cancel', 'no', 'close', 'dismiss', 'deny', 'back'];
+
+                // Try inside modals first
+                for (const modalSel of MODAL_SELECTORS) {
+                    let modals;
+                    try { modals = document.querySelectorAll(modalSel); } catch (e) { continue; }
+                    for (const modal of modals) {
+                        try {
+                            const style = window.getComputedStyle(modal);
+                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                        } catch (e) { continue; }
+
+                        const btns = modal.querySelectorAll('button, [role="button"]');
+                        for (const btn of btns) {
+                            if (!isClickableButton(btn)) continue;
+                            const text = getText(btn);
+                            if (CANCEL_TEXT.includes(text) || CANCEL_TEXT.some(t => text.startsWith(t))) {
+                                console.log(`[TaskBot] 🚫 Clicking Cancel in modal: "${getText(btn)}"`);
+                                handledElements.add(btn);
+                                btn.click();
+                                return true; // done
+                            }
+                        }
+                    }
+                }
+
+                // Priority 2: fall back to any visible cancel-like button on the page
+                const allBtns = getAllButtons(document.body);
+                for (const btn of allBtns) {
+                    if (handledElements.has(btn)) continue;
+                    if (!isClickableButton(btn)) continue;
+                    const text = getText(btn);
+                    if (CANCEL_TEXT.includes(text) || CANCEL_TEXT.some(t => text.startsWith(t))) {
+                        console.log(`[TaskBot] 🚫 Clicking Cancel (page-level): "${getText(btn)}"`);
+                        handledElements.add(btn);
+                        btn.click();
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            function attemptLoop() {
+                if (tryClick()) {
+                    resolve(true);
+                } else {
+                    attempt++;
+                    if (attempt < maxRetries) {
+                        setTimeout(attemptLoop, intervalMs);
+                    } else {
+                        console.log(`[TaskBot] ℹ️ No Cancel button found to click after ${maxRetries} attempts — modal may not be open yet.`);
+                        resolve(false);
+                    }
+                }
+            }
+
+            attemptLoop();
+        });
     }
 
     // ─── View Task Detection (Positive Success Signal) ───────────────
-    function detectViewTaskButton() {
-        const buttons = getAllButtons(document.body);
-        for (const btn of buttons) {
-            if (!isClickableButton(btn)) continue;
-            const text = getText(btn);
-            if (text.includes('view') && text.includes('task')) {
-                return true;
-            }
+    const SUCCESS_TEXTS = [
+        'task accepted with this account',
+        "you've already accepted this task"
+    ];
+
+    function detectSuccessSignal() {
+        // 1. Check for success text on the page directly
+        const bodyText = (document.body.textContent || '').toLowerCase();
+        for (const st of SUCCESS_TEXTS) {
+            if (bodyText.includes(st)) return true;
         }
-        const links = document.querySelectorAll('a');
-        for (const link of links) {
-            const text = getText(link);
-            if (text.includes('view') && text.includes('task')) {
-                try {
-                    const style = window.getComputedStyle(link);
-                    if (style.display !== 'none' && style.visibility !== 'hidden') {
-                        return true;
-                    }
-                } catch (e) { /* ignore */ }
-            }
-        }
+
         return false;
     }
 
-    function checkMutationsForViewTask(mutations) {
+    function checkMutationsForSuccessSignal(mutations) {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (node.nodeType !== Node.ELEMENT_NODE) continue;
                 const text = (node.textContent || '').toLowerCase().trim();
-                if (text.includes('view') && text.includes('task')) {
-                    return true;
+
+                for (const st of SUCCESS_TEXTS) {
+                    if (text.includes(st)) return true;
                 }
             }
         }
@@ -287,25 +398,36 @@
             verifyTimer = null;
         }
 
+        const sub = currentSubreddit;
+        const captText = pendingCaptchaText;
+        const captAnswer = pendingCaptchaAnswer;
+
         isVerifyingClaim = false;
-        console.log(`[TaskBot] ✅ Claim VERIFIED — "View Task" button detected!`);
-
-        notifyBackground('TASK_CLAIMED', {
-            captchaExpression: pendingCaptchaText,
-            captchaAnswer: pendingCaptchaAnswer,
-            subreddit: currentSubreddit,
-        });
-
-        // Log BB result as safe + claimed
-        if (currentSubreddit) {
-            notifyBackground('BB_LOG_ENTRY', {
-                subreddit: currentSubreddit,
-                status: 'safe',
-                action: 'claimed',
-            });
-        }
-
         resetState();
+
+        // Non-critical work AFTER state is cleared
+        console.log(`[TaskBot] ✅ Claim VERIFIED — "View Task" button detected!`);
+        notifyBackground('TASK_CLAIMED', {
+            captchaExpression: captText,
+            captchaAnswer: captAnswer,
+            subreddit: sub,
+        });
+        if (sub) {
+            notifyBackground('BB_LOG_ENTRY', { subreddit: sub, status: 'safe', action: 'claimed' });
+        }
+        flushDeferred();
+        
+        // Automatically navigate back to the tasks list after short delay
+        setTimeout(() => {
+            const tasksLink = document.querySelector('nav a[href="/tasks"]') || document.querySelector('a[href="/tasks"]');
+            if (tasksLink) {
+                console.log('[TaskBot] 🔄 Redirecting to active tasks list...');
+                tasksLink.click();
+            } else {
+                console.log('[TaskBot] 🔄 Tasks link not found in navbar, navigating directly...');
+                window.location.href = '/tasks';
+            }
+        }, 50);
     }
 
     // ─── Captcha Solver ──────────────────────────────────────────────
@@ -327,9 +449,8 @@
         try {
             const style = window.getComputedStyle(el);
             if (style.display === 'none') return false;
-            if (style.visibility === 'hidden') return false;
-            if (style.opacity === '0') return false;
-            if (el.offsetParent === null && style.position !== 'fixed' && style.position !== 'sticky') return false;
+            // Ignore visibility and opacity constraints to bypass CSS fade-in animations
+            // and click instantly (< 10ms) as soon as the element is injected
         } catch (e) {
             return false;
         }
@@ -388,58 +509,63 @@
                 searchRoot = searchRoot.parentElement;
             }
         }
+
+        // 1. Look for explicit links containing /r/ (e.g., href="https://old.reddit.com/r/startups")
         const links = searchRoot.querySelectorAll('a[href*="/r/"]');
         for (const link of links) {
             const match = link.href.match(subredditRegex);
             if (match) return match[1].toLowerCase();
         }
+
+        // 2. Check individual leaf nodes to avoid textContent concatenation issues 
+        // (e.g. <span>Reddit Post</span><span>r/startups</span> becomes "Reddit Postr/startups")
+        const allElements = searchRoot.querySelectorAll('*');
+        for (const el of allElements) {
+            if (el.children.length === 0) {
+                const text = (el.textContent || '').trim();
+                // Match exact "r/subreddit" or containing spaces " r/subreddit "
+                const match = text.match(/(?:^|\s)r\/([a-zA-Z0-9_]+)(?:\s|$)/i);
+                if (match) return match[1].toLowerCase();
+            }
+        }
+
+        // 3. Look at innerHTML to easily find >r/subreddit< regardless of element structure
+        const innerHTML = searchRoot.innerHTML || '';
+        const htmlMatch = innerHTML.match(/(?:>|\s|'|")r\/([a-zA-Z0-9_]+)(?=<|\s|'|")/i);
+        if (htmlMatch) return htmlMatch[1].toLowerCase();
+
+        // 4. Fallback: full textContent with boundaries
         const textContent = searchRoot.textContent || '';
         const textMatch = textContent.match(/\br\/([a-zA-Z0-9_]+)\b/i);
         if (textMatch) return textMatch[1].toLowerCase();
+
+        // 5. Fallback: very permissive regex, look for anything that looks like "r/subreddit" 
+        // that's preceded by non-word characters or lowercased words accidentally mashed.
+        // We use {3,21} as reasonably sized subreddit names to prevent false positives.
+        const blindTextMatch = textContent.match(/r\/([a-zA-Z0-9_]{3,21})/i);
+        if (blindTextMatch) return blindTextMatch[1].toLowerCase();
+
+        // 6. Global sweep of all links on page if everything else fails
         const allLinks = document.querySelectorAll('a[href*="/r/"]');
         for (const link of allLinks) {
             const match = link.href.match(subredditRegex);
             if (match) return match[1].toLowerCase();
         }
-        return null;
-    }
 
-    // ─── Local Cache Check ───────────────────────────────────────────
-    function checkLocalCache(subreddit) {
-        const key = subreddit.toLowerCase();
-        const cached = subredditCache.get(key);
-        if (cached && (Date.now() - cached.timestamp) < settings.bbCacheDurationMs) {
-            return { safe: cached.safe, cached: true };
-        }
-        if (cached) {
-            subredditCache.delete(key);
-        }
         return null;
-    }
-
-    function updateLocalCache(subreddit, safe) {
-        subredditCache.set(subreddit.toLowerCase(), {
-            safe,
-            timestamp: Date.now(),
-        });
     }
 
     // ─── BotBouncer Background Check (Fire & Forget) ─────────────────
+    // NO logging during hot path — just fire the check and handle result
     function fireBBCheck(subreddit) {
-        console.log(`[BotBouncer] 🔍 Firing parallel check for r/${subreddit}...`);
-
-        notifyBackground('BB_LOG_ENTRY', {
-            subreddit,
-            status: 'pending',
-            action: 'checking',
-        });
+        // Defer the log — don't block the hot path
+        deferNotify('BB_LOG_ENTRY', { subreddit, status: 'pending', action: 'checking' });
 
         try {
             chrome.runtime.sendMessage(
                 { type: 'CHECK_BOTBOUNCER', payload: { subreddit } },
                 (response) => {
                     if (chrome.runtime.lastError) {
-                        console.warn('[BotBouncer] Runtime error:', chrome.runtime.lastError.message);
                         handleBBResult(subreddit, false, chrome.runtime.lastError.message);
                         return;
                     }
@@ -448,25 +574,19 @@
                 }
             );
         } catch (err) {
-            console.warn('[BotBouncer] sendMessage error:', err.message);
             handleBBResult(subreddit, false, err.message);
         }
     }
 
     function handleBBResult(subreddit, safe, error) {
-        updateLocalCache(subreddit, safe);
-
-        // ── Always log the BB result so the BB Logs panel updates from "Pending" ──
-        notifyBackground('BB_LOG_ENTRY', {
+        // Defer log — don't block the hot path
+        deferNotify('BB_LOG_ENTRY', {
             subreddit,
             status: safe ? 'safe' : 'unsafe',
             action: safe ? 'confirmed_safe' : (error ? 'check_error' : 'bb_detected'),
         });
 
-        if (pendingSubreddit !== subreddit) {
-            console.log(`[BotBouncer] Result for r/${subreddit} arrived but task changed — ignoring`);
-            return;
-        }
+        if (pendingSubreddit !== subreddit) return;
 
         bbCheckCompleted = true;
         bbCheckResult = safe;
@@ -476,10 +596,7 @@
             bbCheckTimer = null;
         }
 
-        if (safe) {
-            console.log(`[BotBouncer] ✅ r/${subreddit} is SAFE`);
-        } else {
-            console.warn(`[BotBouncer] ⛔ r/${subreddit} is UNSAFE — BotBouncer detected`);
+        if (!safe) {
             abortSubmission = true;
         }
 
@@ -503,46 +620,32 @@
 
         // If BB protection is disabled entirely, submit freely
         if (!settings.botBouncerCheckEnabled) {
-            console.log(`[TaskBot] 🔓 BB check disabled — submitting captcha`);
             submitCaptcha();
             return;
         }
 
         // STRICT: If abort flag is set (BB detected), abort immediately
         if (abortSubmission) {
-            console.warn(`[TaskBot] 🛡️ STRICT ABORT — BotBouncer detected in r/${pendingSubreddit}`);
             silentAbort(pendingSubreddit || 'unknown');
             return;
         }
 
         // STRICT: ONLY submit if we have EXPLICIT confirmation that subreddit is safe
         if (bbCheckCompleted === true && bbCheckResult === true) {
-            console.log(`[TaskBot] ✅ BB check CONFIRMED SAFE for r/${pendingSubreddit} — submitting captcha`);
             submitCaptcha();
             return;
         }
 
-        // BB check completed but result is NOT safe (error, HTTP failure, etc.)
+        // BB check completed but result is NOT safe
         if (bbCheckCompleted === true && bbCheckResult !== true) {
-            console.warn(`[TaskBot] 🛡️ STRICT ABORT — BB check completed but NOT safe for r/${pendingSubreddit}`);
-            notifyBackground('BB_LOG_ENTRY', {
-                subreddit: pendingSubreddit,
-                status: 'unsafe',
-                action: 'aborted_not_safe',
-            });
+            deferNotify('BB_LOG_ENTRY', { subreddit: pendingSubreddit, status: 'unsafe', action: 'aborted_not_safe' });
             silentAbort(pendingSubreddit || 'unknown');
             return;
         }
 
-        // BB check NOT completed yet — this is the timeout path
-        // STRICT: ALWAYS abort on timeout. NEVER submit without green signal.
+        // BB check NOT completed yet — timeout path. ALWAYS abort.
         if (!bbCheckCompleted) {
-            console.warn(`[TaskBot] ⏱️ STRICT ABORT — BB check timed out for r/${pendingSubreddit}. Will NOT submit.`);
-            notifyBackground('BB_LOG_ENTRY', {
-                subreddit: pendingSubreddit,
-                status: 'timeout',
-                action: 'aborted_timeout_strict',
-            });
+            deferNotify('BB_LOG_ENTRY', { subreddit: pendingSubreddit, status: 'timeout', action: 'aborted_timeout_strict' });
             silentAbort(pendingSubreddit || 'unknown');
             return;
         }
@@ -553,25 +656,14 @@
 
         // ── LAST SAFETY GATE: Double-check BB state before submitting ──
         if (settings.botBouncerCheckEnabled) {
-            if (!bbCheckCompleted) {
-                console.error('[TaskBot] 🚫 BLOCKED — Tried to submit but BB check not completed! Waiting...');
-                return; // DO NOT submit
-            }
-            if (bbCheckResult !== true) {
-                console.error('[TaskBot] 🚫 BLOCKED — Tried to submit but BB result is NOT safe! Aborting...');
-                silentAbort(pendingSubreddit || 'unknown');
-                return; // DO NOT submit
-            }
-            if (abortSubmission) {
-                console.error('[TaskBot] 🚫 BLOCKED — abortSubmission flag is set! Aborting...');
-                silentAbort(pendingSubreddit || 'unknown');
-                return; // DO NOT submit
-            }
+            if (!bbCheckCompleted) return;
+            if (bbCheckResult !== true) { silentAbort(pendingSubreddit || 'unknown'); return; }
+            if (abortSubmission) { silentAbort(pendingSubreddit || 'unknown'); return; }
         }
 
         hasSubmittedCaptcha = true;
-        console.log(`[TaskBot] 📤 SUBMITTING captcha — BB confirmed safe for r/${pendingSubreddit || 'unknown'}`);
 
+        // ── CLICK SUBMIT — absolute priority, nothing else ──
         if (storedSubmitBtn && isClickableButton(storedSubmitBtn)) {
             handledElements.add(storedSubmitBtn);
             storedSubmitBtn.click();
@@ -580,126 +672,140 @@
         }
 
         isVerifyingClaim = true;
-        console.log(`[TaskBot] ⏳ Captcha submitted (${pendingCaptchaText} = ${pendingCaptchaAnswer}). Waiting for "View Task" to confirm...`);
 
-        if (detectViewTaskButton()) {
-            confirmClaimSuccess();
-            return;
-        }
+        // Check for immediate result
+        if (detectSuccessSignal()) { confirmClaimSuccess(); return; }
         const immediateError = detectErrorToast();
-        if (immediateError) {
-            abortClaim(immediateError);
-            return;
-        }
+        if (immediateError) { abortClaim(immediateError); return; }
 
+        // Wait for confirmation — reduced from 5s to 2s
         verifyTimer = setTimeout(() => {
             verifyTimer = null;
             if (!isVerifyingClaim) return;
-            if (detectViewTaskButton()) { confirmClaimSuccess(); return; }
+            if (detectSuccessSignal()) { confirmClaimSuccess(); return; }
             const finalError = detectErrorToast();
             if (finalError) { abortClaim(finalError); return; }
-            console.warn(`[TaskBot] ⚠️ No confirmation signal after 5s — treating as FAILED`);
             abortClaim('timeout — no confirmation signal detected');
-        }, 5000);
+        }, 2000);
     }
 
-    // ─── Stage A: Accept Task (IMMEDIATE — no BB wait) ───────────────
-    function tryAcceptTask() {
-        if (hasClickedAccept) return false;
-
-        let targetButton = null;
+    // ─── Task Queue Management ────────────────────────────────────────
+    /**
+     * Rebuild the task queue by scanning ALL visible "Accept Task" buttons.
+     * Skips buttons already in `handledElements`.
+     */
+    function rebuildTaskQueue() {
+        taskQueue = [];
+        taskQueueIndex = 0;
         const buttons = getAllButtons(document.body);
         for (const btn of buttons) {
             if (handledElements.has(btn)) continue;
             if (!isClickableButton(btn)) continue;
             const text = getText(btn);
             if (text.includes('accept') && text.includes('task')) {
-                targetButton = btn;
-                break;
+                taskQueue.push(btn);
             }
         }
-
-        // Also try user-configured selector
-        if (!targetButton && settings.claimSelector && settings.claimSelector.trim()) {
+        // Also include buttons matched by user-configured selector
+        if (settings.claimSelector && settings.claimSelector.trim()) {
             try {
-                const btn = document.querySelector(settings.claimSelector);
-                if (btn && isClickableButton(btn) && !handledElements.has(btn)) {
-                    targetButton = btn;
+                const matched = document.querySelectorAll(settings.claimSelector);
+                for (const btn of matched) {
+                    if (!handledElements.has(btn) && isClickableButton(btn) && !taskQueue.includes(btn)) {
+                        taskQueue.push(btn);
+                    }
                 }
             } catch (e) {
                 console.warn('[TaskBot] Invalid claimSelector:', e.message);
             }
         }
+        console.log(`[TaskBot] 🗂️ Task queue rebuilt — ${taskQueue.length} task(s) found`);
+    }
+
+    /**
+     * Advance to the next task in the queue without rebuilding it.
+     * Called after a failed/aborted claim so the bot tries the next card.
+     */
+    function advanceToNextTask() {
+        if (isAdvancing) return;
+        isAdvancing = true;
+
+        // Minimal delay for DOM to settle
+        setTimeout(function () {
+            isAdvancing = false;
+            if (!isEnabled) return;
+
+            taskQueueIndex++;
+
+            if (taskQueueIndex < taskQueue.length) {
+                runCurrentStage();
+            } else {
+                rebuildTaskQueue();
+                if (taskQueue.length > 0) {
+                    runCurrentStage();
+                }
+            }
+        }, 100); // 100ms — just enough for DOM to settle
+    }
+
+    // ─── Stage A: Accept Task (IMMEDIATE — no BB wait) ───────────────
+    function tryAcceptTask() {
+        if (hasClickedAccept) return false;
+
+        // On the very first call (or after queue exhausted), build the queue
+        if (taskQueue.length === 0 || taskQueueIndex >= taskQueue.length) {
+            rebuildTaskQueue();
+        }
+
+        // Walk from the current index to find the next unhandled, clickable button
+        let targetButton = null;
+        while (taskQueueIndex < taskQueue.length) {
+            const candidate = taskQueue[taskQueueIndex];
+            if (!handledElements.has(candidate) && isClickableButton(candidate)) {
+                targetButton = candidate;
+                break;
+            }
+            // Already handled or gone — skip
+            taskQueueIndex++;
+        }
 
         if (!targetButton) return false;
 
-        // ── CLICK IMMEDIATELY — no waiting! ──
+        // ── CLICK IMMEDIATELY — ZERO overhead ──
         hasClickedAccept = true;
         handledElements.add(targetButton);
         targetButton.click();
-        console.log(`[TaskBot] ⚡ Accept clicked IMMEDIATELY — "${getText(targetButton)}"`);
 
-        // Extract subreddit
+        // Extract subreddit (needed for BB check)
         const subreddit = extractSubredditFromTaskCard(targetButton);
         currentSubreddit = subreddit;
         pendingSubreddit = subreddit;
 
-        notifyBackground('STAGE_ACCEPT', {
-            buttonText: getText(targetButton),
-            subreddit: subreddit || 'unknown',
-        });
+        // Defer ALL logging — don't waste a single ms
+        deferNotify('STAGE_ACCEPT', { buttonText: getText(targetButton), subreddit: subreddit || 'unknown' });
 
-        // ── Fire parallel BB check (if enabled) ──
+        // ── Fire BB check in parallel — NO blocking, NO logging ──
         if (settings.botBouncerCheckEnabled && subreddit) {
-            const cached = checkLocalCache(subreddit);
-            if (cached) {
-                console.log(`[BotBouncer] 📋 Cache hit for r/${subreddit}: ${cached.safe ? 'SAFE' : 'UNSAFE'}`);
-                bbCheckCompleted = true;
-                bbCheckResult = cached.safe;
-                if (!cached.safe) {
+            fireBBCheck(subreddit);
+
+            bbCheckTimer = setTimeout(function () {
+                bbCheckTimer = null;
+                if (!bbCheckCompleted) {
+                    bbCheckCompleted = true;
+                    bbCheckResult = false;
                     abortSubmission = true;
-                }
-            } else {
-                // BB check NOT cached — must wait for result
-                // bbCheckCompleted stays FALSE until handleBBResult is called
-                fireBBCheck(subreddit);
-
-                // Safety timeout: if BB check takes too long, ABORT (never submit)
-                bbCheckTimer = setTimeout(function () {
-                    bbCheckTimer = null;
-                    if (!bbCheckCompleted) {
-                        console.warn(`[BotBouncer] ⏱️ STRICT: Check timed out after ${settings.bbCheckTimeoutMs}ms — will ABORT if captcha solved`);
-                        // Force abort — mark as unsafe so any pending/future finalDecision aborts
-                        bbCheckCompleted = true;
-                        bbCheckResult = false;  // NOT safe
-                        abortSubmission = true;
-
-                        notifyBackground('BB_LOG_ENTRY', {
-                            subreddit: subreddit,
-                            status: 'timeout',
-                            action: 'marked_unsafe_on_timeout',
-                        });
-
-                        // If captcha is already solved and waiting, trigger abort
-                        if (hasSolvedCaptcha && !hasSubmittedCaptcha) {
-                            finalDecision(); // will abort because abortSubmission=true
-                        }
+                    deferNotify('BB_LOG_ENTRY', { subreddit, status: 'timeout', action: 'marked_unsafe_on_timeout' });
+                    if (hasSolvedCaptcha && !hasSubmittedCaptcha) {
+                        finalDecision();
                     }
-                }, settings.bbCheckTimeoutMs);
-            }
+                }
+            }, settings.bbCheckTimeoutMs);
         } else if (settings.botBouncerCheckEnabled && !subreddit) {
-            // STRICT: Cannot proceed without knowing the subreddit — mark as UNSAFE
-            console.warn('[BotBouncer] ⛔ STRICT: Could not extract subreddit — treating as UNSAFE');
             bbCheckCompleted = true;
             bbCheckResult = false;
             abortSubmission = true;
-            notifyBackground('BB_LOG_ENTRY', {
-                subreddit: 'unknown',
-                status: 'unsafe',
-                action: 'no_subreddit_strict_abort',
-            });
+            deferNotify('BB_LOG_ENTRY', { subreddit: 'unknown', status: 'unsafe', action: 'no_subreddit_strict_abort' });
         } else {
-            // BB check is disabled — proceed freely
             bbCheckCompleted = true;
             bbCheckResult = true;
         }
@@ -733,8 +839,8 @@
                     hasClickedConfirm = true;
                     handledElements.add(btn);
                     btn.click();
-                    console.log(`[TaskBot] 🔘 Confirmation clicked: "${text}"`);
-                    notifyBackground('STAGE_CONFIRM', { buttonText: text });
+                    // Defer log — don't block
+                    deferNotify('STAGE_CONFIRM', { buttonText: text });
                     runCurrentStage();
                     return true;
                 }
@@ -749,8 +855,7 @@
                     hasClickedConfirm = true;
                     handledElements.add(btn);
                     btn.click();
-                    console.log(`[TaskBot] 🔘 Modal confirmation clicked: "${text}"`);
-                    notifyBackground('STAGE_CONFIRM', { buttonText: text });
+                    deferNotify('STAGE_CONFIRM', { buttonText: text });
                     runCurrentStage();
                     return true;
                 }
@@ -841,14 +946,14 @@
         }
         storedSubmitBtn = submitBtn;
 
-        console.log(`[TaskBot] 🧮 Captcha solved: ${captchaText} = ${answer} — HOLDING submission...`);
+        // Defer captcha log — don't waste time during hot path
+        deferLog(`🧮 Captcha solved: ${captchaText} = ${answer}`);
 
         // ── Now decide: submit or wait for BB ──
         if (bbCheckCompleted) {
             finalDecision();
-        } else {
-            console.log(`[TaskBot] ⏳ Waiting for BB check result before submitting...`);
         }
+        // If BB not completed yet, wait silently — handleBBResult will call finalDecision
 
         return true;
     }
@@ -879,6 +984,10 @@
     }
 
     // ─── State Reset ─────────────────────────────────────────────────
+    /**
+     * Reset per-task claim state but deliberately KEEP the taskQueue and
+     * taskQueueIndex so advanceToNextTask() can continue from where we left off.
+     */
     function resetState() {
         hasClickedAccept = false;
         hasClickedConfirm = false;
@@ -903,6 +1012,7 @@
             clearTimeout(bbCheckTimer);
             bbCheckTimer = null;
         }
+        // NOTE: taskQueue, taskQueueIndex, isAdvancing are intentionally NOT reset here
     }
 
     // ─── Run Current Stage ───────────────────────────────────────────
@@ -931,36 +1041,25 @@
         if (observer) return;
 
         console.log('[TaskBot] 👁️ MutationObserver STARTED — watching for tasks...');
-
-        // Push a log to background so it shows in the popup
-        notifyBackground('PUSH_LOG', {
-            level: 'info',
-            message: '👁️ Observer started — watching for tasks on ' + window.location.hostname,
-        });
+        notifyBackground('PUSH_LOG', { level: 'info', message: '👁️ Observer started — watching for tasks on ' + window.location.hostname });
 
         observer = new MutationObserver(function (mutations) {
             if (!isEnabled) return;
 
-            mutationCount++;
-
-            // Log first few mutations for diagnostics
-            if (mutationCount <= 3) {
-                console.log(`[TaskBot] 📡 Mutation #${mutationCount} detected (${mutations.length} records)`);
-            }
+            // NO logging during hot path — pure action only
 
             // Check for error toasts in newly added nodes
             if (hasClickedAccept) {
                 const errorText = checkMutationsForErrorToast(mutations);
                 if (errorText) {
-                    console.warn(`[TaskBot] 🚨 Error toast detected: "${errorText}"`);
                     abortClaim(errorText);
                     return;
                 }
             }
 
-            // If in verification phase, check for "View Task" button
+            // If in verification phase, check for success signals
             if (isVerifyingClaim) {
-                if (checkMutationsForViewTask(mutations)) {
+                if (checkMutationsForSuccessSignal(mutations)) {
                     confirmClaimSuccess();
                 }
                 return;
@@ -987,8 +1086,13 @@
             observer.disconnect();
             observer = null;
             console.log('[TaskBot] ⏹️ MutationObserver STOPPED');
+            notifyBackground('PUSH_LOG', { level: 'info', message: '⏹️ Observer stopped' });
         }
         mutationCount = 0;
+        // Full reset including task queue when bot is disabled
+        taskQueue = [];
+        taskQueueIndex = 0;
+        isAdvancing = false;
         resetState();
     }
 
@@ -1005,21 +1109,22 @@
             captchaInputSelector: state.captchaInputSelector || '',
             submitSelector: state.submitSelector || '',
             soundEnabled: state.soundEnabled !== false,
-            delayMs: state.delayMs || 0,
             safeModeEnabled: state.safeModeEnabled || false,
             botBouncerCheckEnabled: state.botBouncerCheckEnabled !== false,
-            bbCheckTimeoutMs: state.bbCheckTimeoutMs || 1000,
-            bbTimeoutAction: state.bbTimeoutAction || 'submit',
+            bbCheckTimeoutMs: state.bbCheckTimeoutMs || 3000,
+            bbTimeoutAction: state.bbTimeoutAction || 'abort',
             bbCacheDurationMs: state.bbCacheDurationMs || (30 * 60 * 1000),
             maxParallelChecks: state.maxParallelChecks || 2,
         };
 
         if (isEnabled && !wasEnabled) {
             console.log('[TaskBot] ▶️ Enabling — starting observer...');
+            notifyBackground('PUSH_LOG', { level: 'success', message: '▶️ Bot ENABLED — starting observer...' });
             resetState();
             startObserver();
         } else if (!isEnabled && wasEnabled) {
             console.log('[TaskBot] ⏸️ Disabling — stopping observer...');
+            notifyBackground('PUSH_LOG', { level: 'info', message: '⏸️ Bot DISABLED — observer stopped' });
             stopObserver();
         }
     }

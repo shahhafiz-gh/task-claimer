@@ -26,14 +26,17 @@ const DEFAULT_STATE = {
   submitSelector: '',
   // UI settings
   soundEnabled: true,
-  delayMs: 0,
   safeModeEnabled: false,
   // BotBouncer settings
   botBouncerCheckEnabled: true,
-  bbCheckTimeoutMs: 10000,
-  bbTimeoutAction: 'abort',
-  bbCacheDurationMs: 30 * 60 * 1000,
+  // BB check settings — optimized for speed
+  bbCheckTimeoutMs: 3000,          // max wait before abort (3s — fast)
+  bbTimeoutAction: 'abort',        // STRICT: always abort on timeout
+  bbCacheDurationMs: 30 * 60 * 1000,  // 30 minutes
   maxParallelChecks: 2,
+  showBBLogs: true,
+  botBouncerCacheTtlMs: 30 * 60 * 1000,
+  botBouncerTimeoutMs: 3000,
 };
 
 // ─── Activity Log System ──────────────────────────────────────────
@@ -316,27 +319,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'CHECK_BOTBOUNCER': {
       const { subreddit } = payload;
       if (!subreddit) {
-        addLog('error', '🚫 BotBouncer check called with no subreddit');
         sendResponse({ safe: false, error: 'No subreddit provided' });
         return false;
       }
 
-      addLog('info', `🔍 Checking r/${subreddit} for BotBouncer...`);
+      // NO logging during hot path — use defaults directly, skip storage read
+      const timeoutMs = DEFAULT_STATE.botBouncerTimeoutMs;
+      const cacheTtlMs = DEFAULT_STATE.bbCacheDurationMs;
 
-      chrome.storage.local.get('state', ({ state }) => {
-        const s = state || DEFAULT_STATE;
-        const timeoutMs = s.bbCheckTimeoutMs || 5000;
-        const cacheTtlMs = s.bbCacheDurationMs || 1800000;
-
-        queueBotBouncerCheck(subreddit, timeoutMs, cacheTtlMs)
-          .then((result) => {
-            sendResponse(result);
-          })
-          .catch((err) => {
-            addLog('error', `💥 BotBouncer check crashed: ${err.message}`);
-            sendResponse({ safe: false, error: err.message });
-          });
-      });
+      queueBotBouncerCheck(subreddit, timeoutMs, cacheTtlMs)
+        .then((result) => {
+          sendResponse(result);
+        })
+        .catch((err) => {
+          sendResponse({ safe: false, error: err.message });
+        });
       return true;
     }
 

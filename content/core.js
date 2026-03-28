@@ -68,6 +68,12 @@ var TB = {
   SUCCESS_TEXTS: [
     'task accepted with this account',
     "you've already accepted this task",
+    'task accepted',
+    'successfully accepted',
+    'task claimed',
+    'successfully claimed',
+    'accepted successfully',
+    'claimed successfully',
   ],
 };
 

@@ -89,8 +89,12 @@
     var cardSelectors = [
       '[class*="task"]', '[class*="card"]', '[class*="item"]',
       '[class*="row"]', '[class*="job"]', '[class*="listing"]',
+      '[class*="Task"]', '[class*="Card"]', '[class*="Item"]',
       'tr', 'li', 'article', 'section',
       '[role="listitem"]', '[role="row"]',
+      // New dashboard layout — task containers
+      '[class*="available"]', '[class*="Available"]',
+      'div[class*="border"]', 'div[class*="rounded"]',
     ];
 
     var root = null;

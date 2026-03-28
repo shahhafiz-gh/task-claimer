@@ -5,6 +5,9 @@
   'use strict';
   var S = TB.state;
 
+  // Track URL for SPA navigation detection
+  var lastUrl = window.location.href;
+
   function startObserver() {
     if (S.observer) return;
     TB.notify('PUSH_LOG', {
@@ -14,6 +17,20 @@
 
     S.observer = new MutationObserver(function (mutations) {
       if (!S.isEnabled) return;
+
+      // SPA navigation detection — if URL changed, reset and rescan
+      var currentUrl = window.location.href;
+      if (currentUrl !== lastUrl) {
+        lastUrl = currentUrl;
+        console.log('[TaskBot] 🔄 SPA navigation detected: ' + currentUrl);
+        if (currentUrl.includes('/tasks')) {
+          // We're on the tasks page — reset and start scanning for new tasks
+          if (!S.hasClickedAccept && !S.isVerifyingClaim && !S.hasSubmittedCaptcha) {
+            TB.resetState();
+            TB.scheduleRescan();
+          }
+        }
+      }
 
       // Fast path: scan addedNodes directly for accept buttons
       if (!S.hasClickedAccept && !S.isVerifyingClaim && !S.hasSubmittedCaptcha) {
@@ -59,11 +76,38 @@
     });
 
     TB.runCurrentStage();
+
+    // Start periodic idle scan — catches tasks that appear without DOM mutations
+    // (e.g. WebSocket push, React state update that doesn't trigger attributed mutations)
+    startIdleScan();
+  }
+
+  // Periodic idle scan interval ID
+  var idleScanTimer = null;
+  var IDLE_SCAN_INTERVAL = 2000; // 2 seconds — check for tasks that appeared silently
+
+  function startIdleScan() {
+    if (idleScanTimer) return;
+    idleScanTimer = setInterval(function () {
+      if (!S.isEnabled) return;
+      if (S.hasClickedAccept || S.isVerifyingClaim || S.hasSubmittedCaptcha) return;
+      // Quick DOM scan for accept buttons
+      TB.rebuildTaskQueue();
+      if (S.taskQueue.length > 0) {
+        console.log('[TaskBot] 🔍 Idle scan found ' + S.taskQueue.length + ' task(s)');
+        TB.runCurrentStage();
+      }
+    }, IDLE_SCAN_INTERVAL);
+  }
+
+  function stopIdleScan() {
+    if (idleScanTimer) { clearInterval(idleScanTimer); idleScanTimer = null; }
   }
 
   function stopObserver() {
     if (S.observer) { S.observer.disconnect(); S.observer = null; }
     if (S.stageRAF) { cancelAnimationFrame(S.stageRAF); S.stageRAF = null; }
+    stopIdleScan();
     S.taskQueue = [];
     S.taskQueueIndex = 0;
     S.isAdvancing = false;

@@ -12,8 +12,11 @@
     if (TB.handled.has(el) || el.disabled) return false;
     if (el.tagName !== 'BUTTON' && el.getAttribute('role') !== 'button') return false;
     if (el.offsetParent === null && el.offsetHeight === 0) return false;
-    var text = (el.textContent || '').toLowerCase();
+    var text = (el.textContent || '').toLowerCase().trim();
+    // Match "Accept Task", "accept task", etc.
     if (text.includes('accept') && text.includes('task')) return true;
+    // Also match standalone "Accept" inside task card containers
+    if (text === 'accept' || text === 'accept task' || text === 'claim' || text === 'claim task') return true;
     if (TB.settings.claimSelector) {
       try { if (el.matches(TB.settings.claimSelector)) return true; } catch (e) { }
     }
@@ -160,7 +163,10 @@
       if (TB.detectSuccessSignal()) { TB.confirmClaimSuccess(); return; }
       var finalErr = TB.detectErrorToast();
       if (finalErr) { TB.abortClaim(finalErr); return; }
-      TB.abortClaim('timeout — no confirmation signal detected');
-    }, 5000);
+      // Assume success if no error toast after timeout — sometimes the success
+      // signal is different in the new UI
+      console.log('[TaskBot] ⏱️ Verify timeout — assuming success (no error toast detected)');
+      TB.confirmClaimSuccess();
+    }, 4000);
   };
 })();

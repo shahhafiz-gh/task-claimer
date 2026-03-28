@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Task Auto Claimer",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Accept First, Verify Later — ultra-fast task claiming (<50ms) with parallel BotBouncer protection.",
   "permissions": [
     "storage",

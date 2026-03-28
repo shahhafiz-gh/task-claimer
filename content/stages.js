@@ -14,7 +14,15 @@
     TB.notify('TASK_CLAIM_FAILED', { reason: reason, subreddit: S.currentSubreddit });
     S.isVerifyingClaim = false;
     TB.resetState();
-    TB.advanceToNextTask();
+    // After abort, try to advance to next task or go back to /tasks
+    setTimeout(function () {
+      TB.rebuildTaskQueue();
+      if (S.taskQueue.length > 0) {
+        TB.advanceToNextTask();
+      } else {
+        TB.navigateToTasks();
+      }
+    }, 300);
   };
 
   TB.silentAbort = function (subreddit) {
@@ -99,11 +107,60 @@
       TB.notify('BB_LOG_ENTRY', { subreddit: S.currentSubreddit, status: 'safe', action: 'claimed' });
     }
     TB.resetState();
+    // Navigate back to tasks page to monitor for the next task
     setTimeout(function () {
-      var link = document.querySelector('nav a[href="/tasks"]') || document.querySelector('a[href="/tasks"]');
-      if (link) link.click();
-      else window.location.href = '/tasks';
-    }, 1000);
+      TB.navigateToTasks();
+    }, 800);
+  };
+
+  // ─── Navigate to Tasks Page (new dashboard sidebar) ────
+  TB.navigateToTasks = function () {
+    // New dashboard sidebar selectors (current UI)
+    var TASKS_SELECTORS = [
+      'a[href="/tasks"]',                    // direct link
+      'a[href*="/tasks"]',                   // partial match
+      'nav a[href="/tasks"]',                // inside nav
+      '[class*="sidebar"] a[href="/tasks"]', // sidebar nav
+      '[class*="Sidebar"] a[href="/tasks"]',
+      '[class*="nav"] a[href="/tasks"]',
+      '[class*="Nav"] a[href="/tasks"]',
+      '[class*="menu"] a[href="/tasks"]',
+      '[class*="Menu"] a[href="/tasks"]',
+    ];
+    for (var i = 0; i < TASKS_SELECTORS.length; i++) {
+      try {
+        var link = document.querySelector(TASKS_SELECTORS[i]);
+        if (link) {
+          link.click();
+          console.log('[TaskBot] 🔄 Navigated to tasks via: ' + TASKS_SELECTORS[i]);
+          TB.scheduleRescan();
+          return;
+        }
+      } catch (e) { /* invalid selector */ }
+    }
+    // Fallback: direct navigation
+    console.log('[TaskBot] 🔄 Navigating to /tasks via URL');
+    window.location.href = '/tasks';
+  };
+
+  // ─── Schedule Rescan After Navigation ──────────────────
+  // After SPA navigation, the DOM may update asynchronously.
+  // We schedule multiple rescans to catch newly rendered tasks.
+  TB.scheduleRescan = function () {
+    var delays = [500, 1000, 2000, 3000, 5000];
+    for (var i = 0; i < delays.length; i++) {
+      (function (delay) {
+        setTimeout(function () {
+          if (!S.isEnabled) return;
+          if (S.hasClickedAccept || S.isVerifyingClaim || S.hasSubmittedCaptcha) return;
+          TB.rebuildTaskQueue();
+          if (S.taskQueue.length > 0) {
+            console.log('[TaskBot] 🔍 Rescan found ' + S.taskQueue.length + ' task(s) after ' + delay + 'ms');
+            TB.runCurrentStage();
+          }
+        }, delay);
+      })(delays[i]);
+    }
   };
 
   // ─── Task Queue ────────────────────────────────────────
@@ -114,7 +171,12 @@
     for (var i = 0; i < buttons.length; i++) {
       if (TB.handled.has(buttons[i]) || !TB.isClickableButton(buttons[i])) continue;
       var text = TB.getText(buttons[i]);
-      if (text.includes('accept') && text.includes('task')) S.taskQueue.push(buttons[i]);
+      // Match various accept/claim button texts from the new dashboard UI
+      if ((text.includes('accept') && text.includes('task')) ||
+          text === 'accept' || text === 'accept task' ||
+          text === 'claim' || text === 'claim task') {
+        S.taskQueue.push(buttons[i]);
+      }
     }
     if (TB.settings.claimSelector) {
       try {
@@ -139,9 +201,15 @@
         TB.runCurrentStage();
       } else {
         TB.rebuildTaskQueue();
-        if (S.taskQueue.length > 0) TB.runCurrentStage();
+        if (S.taskQueue.length > 0) {
+          TB.runCurrentStage();
+        } else {
+          // No more tasks on this page — navigate back and keep monitoring
+          console.log('[TaskBot] 🔄 No more tasks in queue, navigating to /tasks to keep monitoring');
+          TB.navigateToTasks();
+        }
       }
-    }, 800);
+    }, 500);
   };
 
   // ─── Stage A: Accept Task ──────────────────────────────

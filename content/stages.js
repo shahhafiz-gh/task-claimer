@@ -233,6 +233,7 @@
     TB.handled.add(targetButton);
     targetButton.click();
     console.log('[TaskBot] ⚡ Accept clicked — "' + TB.getText(targetButton) + '"');
+    TB.startWatchdog('accept');
     TB.deferPostClick(targetButton);
     TB.runCurrentStage();
     return true;
@@ -256,6 +257,7 @@
         S.hasClickedConfirm = true;
         TB.handled.add(btn); btn.click();
         TB.notify('STAGE_CONFIRM', { buttonText: text });
+        TB.startWatchdog('confirm');
         TB.runCurrentStage();
         return true;
       }
@@ -271,6 +273,7 @@
         S.hasClickedConfirm = true;
         TB.handled.add(btn); btn.click();
         TB.notify('STAGE_CONFIRM', { buttonText: text });
+        TB.startWatchdog('confirm');
         TB.runCurrentStage();
         return true;
       }
@@ -340,6 +343,44 @@
     return true;
   };
 
+  // ─── Stage Watchdog ────────────────────────────────────
+  // If we're stuck in any intermediate stage (accept clicked but no confirm,
+  // confirm clicked but no captcha, etc.) for more than WATCHDOG_TIMEOUT_MS,
+  // force-reset and resume monitoring. This prevents the bot from going
+  // permanently dead when a claim attempt silently fails.
+  var WATCHDOG_TIMEOUT_MS = 12000; // 12 seconds max per stage
+
+  TB.startWatchdog = function (stageName) {
+    TB.clearWatchdog();
+    S.lastStageTransition = Date.now();
+    S.stageWatchdog = setTimeout(function () {
+      S.stageWatchdog = null;
+      // Only fire if we're still in an intermediate state
+      if (!S.isEnabled) return;
+      if (S.hasSubmittedCaptcha || S.isVerifyingClaim) return; // these have their own timeouts
+      console.warn('[TaskBot] ⏰ WATCHDOG — stuck in stage "' + stageName + '" for ' + WATCHDOG_TIMEOUT_MS + 'ms, force-resetting');
+      TB.notify('PUSH_LOG', {
+        level: 'warn',
+        message: '⏰ Watchdog reset — stuck at "' + stageName + '" stage, resuming monitoring',
+      });
+      S.isVerifyingClaim = false;
+      TB.resetState();
+      // Navigate back to tasks to keep monitoring
+      setTimeout(function () {
+        TB.rebuildTaskQueue();
+        if (S.taskQueue.length > 0) {
+          TB.runCurrentStage();
+        } else {
+          TB.navigateToTasks();
+        }
+      }, 300);
+    }, WATCHDOG_TIMEOUT_MS);
+  };
+
+  TB.clearWatchdog = function () {
+    if (S.stageWatchdog) { clearTimeout(S.stageWatchdog); S.stageWatchdog = null; }
+  };
+
   // ─── Stage Router ──────────────────────────────────────
   TB.runCurrentStage = function () {
     if (!S.isEnabled || S.isVerifyingClaim || S.hasSubmittedCaptcha) return;
@@ -363,7 +404,9 @@
     S.pendingCaptchaAnswer = null;
     S.storedCaptchaInput = null;
     S.storedSubmitBtn = null;
+    S.lastStageTransition = 0;
     if (S.verifyTimer) { clearTimeout(S.verifyTimer); S.verifyTimer = null; }
     if (S.bbCheckTimer) { clearTimeout(S.bbCheckTimer); S.bbCheckTimer = null; }
+    TB.clearWatchdog();
   };
 })();

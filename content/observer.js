@@ -90,7 +90,31 @@
     if (idleScanTimer) return;
     idleScanTimer = setInterval(function () {
       if (!S.isEnabled) return;
-      if (S.hasClickedAccept || S.isVerifyingClaim || S.hasSubmittedCaptcha) return;
+
+      // Stuck state detection — if we've been in an intermediate state
+      // for over 15 seconds with no watchdog firing, force reset here too.
+      // This is a safety net in case the watchdog was somehow cleared.
+      if (S.hasClickedAccept && !S.hasSubmittedCaptcha && !S.isVerifyingClaim) {
+        if (S.lastStageTransition > 0 && (Date.now() - S.lastStageTransition) > 15000) {
+          console.warn('[TaskBot] ⏰ Idle scan detected stuck state (' +
+            (Date.now() - S.lastStageTransition) + 'ms since last transition), force-resetting');
+          TB.notify('PUSH_LOG', {
+            level: 'warn',
+            message: '⏰ Idle scan: stuck state detected, force-resetting to monitor',
+          });
+          TB.resetState();
+          TB.rebuildTaskQueue();
+          if (S.taskQueue.length > 0) {
+            TB.runCurrentStage();
+          } else {
+            TB.navigateToTasks();
+          }
+          return;
+        }
+        return; // Still in a claim attempt, don't scan for new tasks
+      }
+      if (S.isVerifyingClaim || S.hasSubmittedCaptcha) return;
+
       // Quick DOM scan for accept buttons
       TB.rebuildTaskQueue();
       if (S.taskQueue.length > 0) {

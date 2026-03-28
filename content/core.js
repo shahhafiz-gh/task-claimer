@@ -29,6 +29,9 @@ var TB = {
     taskQueueIndex: 0,
     isAdvancing: false,
     stageRAF: null,
+    // Watchdog: auto-reset if stuck in any intermediate stage
+    stageWatchdog: null,
+    lastStageTransition: 0,
   },
 
   settings: {

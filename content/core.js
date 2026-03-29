@@ -28,6 +28,7 @@ var TB = {
     taskQueue: [],
     taskQueueIndex: 0,
     isAdvancing: false,
+    bulkAcceptPending: 0,
     stageRAF: null,
     // Watchdog: auto-reset if stuck in any intermediate stage
     stageWatchdog: null,

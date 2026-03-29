@@ -13,16 +13,31 @@
     if (S.bbCheckTimer) { clearTimeout(S.bbCheckTimer); S.bbCheckTimer = null; }
     TB.notify('TASK_CLAIM_FAILED', { reason: reason, subreddit: S.currentSubreddit });
     S.isVerifyingClaim = false;
+
+    var pendingCount = S.bulkAcceptPending > 1 ? S.bulkAcceptPending - 1 : 0;
     TB.resetState();
-    // After abort, try to advance to next task or go back to /tasks
-    setTimeout(function () {
-      TB.rebuildTaskQueue();
-      if (S.taskQueue.length > 0) {
-        TB.advanceToNextTask();
-      } else {
-        TB.navigateToTasks();
-      }
-    }, 300);
+
+    if (pendingCount > 0) {
+      // More tasks were bulk-accepted — move to the next modal
+      S.bulkAcceptPending = pendingCount;
+      console.log('[TaskBot] 🔄 Bulk mode: ' + pendingCount + ' task(s) still pending after abort');
+      setTimeout(function () {
+        if (!S.isEnabled) return;
+        S.hasClickedAccept = true;
+        TB.startWatchdog('bulk-next');
+        TB.deferPostClickFromModal();
+      }, 300);
+    } else {
+      // After abort, try to advance to next task or go back to /tasks
+      setTimeout(function () {
+        TB.rebuildTaskQueue();
+        if (S.taskQueue.length > 0) {
+          TB.advanceToNextTask();
+        } else {
+          TB.navigateToTasks();
+        }
+      }, 300);
+    }
   };
 
   TB.silentAbort = function (subreddit) {
@@ -31,10 +46,25 @@
     if (S.bbCheckTimer) { clearTimeout(S.bbCheckTimer); S.bbCheckTimer = null; }
     TB.notify('TASK_SKIPPED_BOTBOUNCER', { subreddit: subreddit });
     TB.notify('BB_LOG_ENTRY', { subreddit: subreddit, status: 'unsafe', action: 'skipped' });
+
+    var pendingCount = S.bulkAcceptPending > 1 ? S.bulkAcceptPending - 1 : 0;
+
     TB.clickCancelButton().then(function () {
       S.isVerifyingClaim = false;
       TB.resetState();
-      TB.advanceToNextTask();
+
+      if (pendingCount > 0) {
+        S.bulkAcceptPending = pendingCount;
+        console.log('[TaskBot] 🔄 Bulk mode: ' + pendingCount + ' task(s) still pending after silent abort');
+        setTimeout(function () {
+          if (!S.isEnabled) return;
+          S.hasClickedAccept = true;
+          TB.startWatchdog('bulk-next');
+          TB.deferPostClickFromModal();
+        }, 300);
+      } else {
+        TB.advanceToNextTask();
+      }
     });
   };
 
@@ -106,11 +136,26 @@
     if (S.currentSubreddit) {
       TB.notify('BB_LOG_ENTRY', { subreddit: S.currentSubreddit, status: 'safe', action: 'claimed' });
     }
+
+    var pendingCount = S.bulkAcceptPending > 1 ? S.bulkAcceptPending - 1 : 0;
     TB.resetState();
-    // Navigate back to tasks page to monitor for the next task
-    setTimeout(function () {
-      TB.navigateToTasks();
-    }, 800);
+
+    if (pendingCount > 0) {
+      // More tasks were bulk-accepted — check for more modals
+      S.bulkAcceptPending = pendingCount;
+      console.log('[TaskBot] 🔄 Bulk mode: ' + pendingCount + ' task(s) still pending');
+      setTimeout(function () {
+        if (!S.isEnabled) return;
+        S.hasClickedAccept = true;
+        TB.startWatchdog('bulk-next');
+        TB.deferPostClickFromModal();
+      }, 500);
+    } else {
+      // All done — navigate back to tasks page
+      setTimeout(function () {
+        TB.navigateToTasks();
+      }, 800);
+    }
   };
 
   // ─── Navigate to Tasks Page (new dashboard sidebar) ────
@@ -212,29 +257,40 @@
     }, 500);
   };
 
-  // ─── Stage A: Accept Task ──────────────────────────────
+  // ─── Stage A: Accept Task (Bulk) ────────────────────────
   TB.tryAcceptTask = function () {
     if (S.hasClickedAccept) return false;
     if (S.taskQueue.length === 0 || S.taskQueueIndex >= S.taskQueue.length) {
       TB.rebuildTaskQueue();
     }
 
-    var targetButton = null;
-    while (S.taskQueueIndex < S.taskQueue.length) {
-      var candidate = S.taskQueue[S.taskQueueIndex];
+    // Collect ALL clickable accept buttons
+    var clickable = [];
+    for (var i = S.taskQueueIndex; i < S.taskQueue.length; i++) {
+      var candidate = S.taskQueue[i];
       if (!TB.handled.has(candidate) && TB.isClickableButton(candidate)) {
-        targetButton = candidate; break;
+        clickable.push(candidate);
       }
-      S.taskQueueIndex++;
     }
-    if (!targetButton) return false;
+    if (clickable.length === 0) return false;
 
     S.hasClickedAccept = true;
-    TB.handled.add(targetButton);
-    targetButton.click();
-    console.log('[TaskBot] ⚡ Accept clicked — "' + TB.getText(targetButton) + '"');
+
+    // Click ALL accept buttons at once
+    for (var c = 0; c < clickable.length; c++) {
+      TB.handled.add(clickable[c]);
+      clickable[c].click();
+      console.log('[TaskBot] ⚡ Accept clicked (' + (c + 1) + '/' + clickable.length + ') — "' + TB.getText(clickable[c]) + '"');
+    }
+
+    S.bulkAcceptPending = clickable.length;
+    console.log('[TaskBot] ⚡ Bulk-clicked ' + clickable.length + ' accept button(s) simultaneously');
+
     TB.startWatchdog('accept');
-    TB.deferPostClick(targetButton);
+    // Pre-warm BB cache for all subreddits
+    TB.preWarmBBCache(clickable);
+    // Full post-click processing for the first button
+    TB.deferPostClick(clickable[0]);
     TB.runCurrentStage();
     return true;
   };
@@ -363,17 +419,32 @@
         level: 'warn',
         message: '⏰ Watchdog reset — stuck at "' + stageName + '" stage, resuming monitoring',
       });
+
+      var pendingCount = S.bulkAcceptPending > 1 ? S.bulkAcceptPending - 1 : 0;
       S.isVerifyingClaim = false;
       TB.resetState();
-      // Navigate back to tasks to keep monitoring
-      setTimeout(function () {
-        TB.rebuildTaskQueue();
-        if (S.taskQueue.length > 0) {
-          TB.runCurrentStage();
-        } else {
-          TB.navigateToTasks();
-        }
-      }, 300);
+
+      if (pendingCount > 0) {
+        // Still have bulk tasks pending — try next modal
+        S.bulkAcceptPending = pendingCount;
+        console.log('[TaskBot] 🔄 Watchdog: ' + pendingCount + ' bulk task(s) still pending');
+        setTimeout(function () {
+          if (!S.isEnabled) return;
+          S.hasClickedAccept = true;
+          TB.startWatchdog('bulk-next');
+          TB.deferPostClickFromModal();
+        }, 300);
+      } else {
+        // Navigate back to tasks to keep monitoring
+        setTimeout(function () {
+          TB.rebuildTaskQueue();
+          if (S.taskQueue.length > 0) {
+            TB.runCurrentStage();
+          } else {
+            TB.navigateToTasks();
+          }
+        }, 300);
+      }
     }, WATCHDOG_TIMEOUT_MS);
   };
 

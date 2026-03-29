@@ -34,6 +34,18 @@
     return null;
   };
 
+  TB.fastFindAllAcceptButtons = function (node) {
+    var results = [];
+    if (TB.isAcceptButton(node)) results.push(node);
+    if (node.getElementsByTagName) {
+      var btns = node.getElementsByTagName('button');
+      for (var i = 0; i < btns.length; i++) {
+        if (TB.isAcceptButton(btns[i])) results.push(btns[i]);
+      }
+    }
+    return results;
+  };
+
   // ─── Deferred Post-Click Work ──────────────────────────
   TB.deferPostClick = function (btn) {
     queueMicrotask(function () {
@@ -81,7 +93,27 @@
     TB.handled.add(btn);
     btn.click();
     console.log('[TaskBot] ⚡ FAST-PATH Accept clicked — "' + TB.getText(btn) + '"');
+    S.bulkAcceptPending = 1;
     TB.deferPostClick(btn);
+  };
+
+  TB.fastClickAllAccept = function (buttons) {
+    if (S.hasClickedAccept) return;
+    if (buttons.length === 0) return;
+    S.hasClickedAccept = true;
+
+    for (var i = 0; i < buttons.length; i++) {
+      TB.handled.add(buttons[i]);
+      buttons[i].click();
+      console.log('[TaskBot] ⚡ FAST-PATH Accept clicked (' + (i + 1) + '/' + buttons.length + ') — "' + TB.getText(buttons[i]) + '"');
+    }
+
+    S.bulkAcceptPending = buttons.length;
+    console.log('[TaskBot] ⚡ FAST-PATH Bulk-clicked ' + buttons.length + ' accept button(s)');
+    // Pre-warm BB cache for all subreddits
+    TB.preWarmBBCache(buttons);
+    // Full post-click processing for the first button
+    TB.deferPostClick(buttons[0]);
   };
 
   // ─── BB Check ─────────────────────────────────────────
@@ -133,6 +165,78 @@
       });
       TB.silentAbort(S.pendingSubreddit || 'unknown');
     }
+  };
+
+  // ─── Pre-warm BB Cache for Bulk Accept ──────────────────
+  TB.preWarmBBCache = function (buttons) {
+    if (!TB.settings.botBouncerCheckEnabled) return;
+    for (var i = 1; i < buttons.length; i++) {
+      var subreddit = TB.extractSubreddit(buttons[i]);
+      if (subreddit) {
+        try {
+          chrome.runtime.sendMessage(
+            { type: 'CHECK_BOTBOUNCER', payload: { subreddit: subreddit } },
+            function () { /* pre-warming cache, ignore response */ }
+          );
+        } catch (e) { /* ignore */ }
+      }
+    }
+  };
+
+  // ─── Deferred Post-Click from Modal (Bulk Mode) ────────
+  // Used when processing subsequent modals after bulk-clicking.
+  // Extracts subreddit from the visible modal and fires BB check.
+  TB.deferPostClickFromModal = function () {
+    queueMicrotask(function () {
+      var subreddit = null;
+      var MODAL_SEL = '[role="dialog"], [role="alertdialog"], .modal, .dialog, [class*="modal"], [class*="dialog"], [class*="confirm"], [class*="popup"]';
+      try {
+        var modals = document.querySelectorAll(MODAL_SEL);
+        for (var i = 0; i < modals.length; i++) {
+          try {
+            var style = window.getComputedStyle(modals[i]);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+          } catch (e) { continue; }
+          var match = (modals[i].textContent || '').match(/\/r\/([a-zA-Z0-9_]+)/i);
+          if (match) { subreddit = match[1]; break; }
+        }
+      } catch (e) { /* invalid selector */ }
+
+      S.currentSubreddit = subreddit;
+      S.pendingSubreddit = subreddit;
+
+      TB.notify('STAGE_ACCEPT', {
+        buttonText: '(bulk-next)',
+        subreddit: subreddit || 'unknown',
+      });
+
+      if (TB.settings.botBouncerCheckEnabled && subreddit) {
+        TB.fireBBCheck(subreddit);
+        S.bbCheckTimer = setTimeout(function () {
+          S.bbCheckTimer = null;
+          if (!S.bbCheckCompleted) {
+            S.bbCheckCompleted = true;
+            S.bbCheckResult = false;
+            S.abortSubmission = true;
+            TB.notify('BB_LOG_ENTRY', {
+              subreddit: subreddit, status: 'timeout', action: 'marked_unsafe_on_timeout',
+            });
+            if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha) TB.finalDecision();
+          }
+        }, TB.settings.bbCheckTimeoutMs);
+      } else if (TB.settings.botBouncerCheckEnabled && !subreddit) {
+        S.bbCheckCompleted = true;
+        S.bbCheckResult = false;
+        S.abortSubmission = true;
+        TB.notify('BB_LOG_ENTRY', {
+          subreddit: 'unknown', status: 'unsafe', action: 'no_subreddit_strict_abort',
+        });
+      } else {
+        S.bbCheckCompleted = true;
+        S.bbCheckResult = true;
+      }
+      TB.runCurrentStage();
+    });
   };
 
   // ─── Submit Captcha ────────────────────────────────────

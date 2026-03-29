@@ -32,15 +32,26 @@
         }
       }
 
-      // Fast path: scan addedNodes directly for accept buttons
+      // Fast path: scan addedNodes directly for ALL accept buttons and click them all
       if (!S.hasClickedAccept && !S.isVerifyingClaim && !S.hasSubmittedCaptcha) {
+        var foundButtons = [];
         for (var i = 0; i < mutations.length; i++) {
           var added = mutations[i].addedNodes;
           for (var j = 0; j < added.length; j++) {
             if (added[j].nodeType !== 1) continue;
-            var btn = TB.fastFindAcceptButton(added[j]);
-            if (btn) { TB.fastClickAccept(btn); return; }
+            var btns = TB.fastFindAllAcceptButtons(added[j]);
+            for (var k = 0; k < btns.length; k++) {
+              foundButtons.push(btns[k]);
+            }
           }
+        }
+        if (foundButtons.length > 0) {
+          if (foundButtons.length === 1) {
+            TB.fastClickAccept(foundButtons[0]);
+          } else {
+            TB.fastClickAllAccept(foundButtons);
+          }
+          return;
         }
       }
 
@@ -102,12 +113,22 @@
             level: 'warn',
             message: '⏰ Idle scan: stuck state detected, force-resetting to monitor',
           });
+
+          var pendingCount = S.bulkAcceptPending > 1 ? S.bulkAcceptPending - 1 : 0;
           TB.resetState();
-          TB.rebuildTaskQueue();
-          if (S.taskQueue.length > 0) {
-            TB.runCurrentStage();
+
+          if (pendingCount > 0) {
+            S.bulkAcceptPending = pendingCount;
+            S.hasClickedAccept = true;
+            TB.startWatchdog('bulk-next');
+            TB.deferPostClickFromModal();
           } else {
-            TB.navigateToTasks();
+            TB.rebuildTaskQueue();
+            if (S.taskQueue.length > 0) {
+              TB.runCurrentStage();
+            } else {
+              TB.navigateToTasks();
+            }
           }
           return;
         }
@@ -135,6 +156,7 @@
     S.taskQueue = [];
     S.taskQueueIndex = 0;
     S.isAdvancing = false;
+    S.bulkAcceptPending = 0;
     TB.resetState();
   }
 

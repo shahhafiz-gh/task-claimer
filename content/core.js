@@ -25,6 +25,10 @@ var TB = {
     storedCaptchaInput: null,
     storedSubmitBtn: null,
     currentSubreddit: null,
+    // Cloudflare Turnstile state
+    turnstileDetected: false,
+    turnstileCompleted: false,
+    turnstileTimer: null,
     taskQueue: [],
     taskQueueIndex: 0,
     isAdvancing: false,

@@ -69,7 +69,7 @@
             TB.notify('BB_LOG_ENTRY', {
               subreddit: subreddit, status: 'timeout', action: 'marked_unsafe_on_timeout',
             });
-            if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha) TB.finalDecision();
+            if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha && (!S.turnstileDetected || S.turnstileCompleted)) TB.finalDecision();
           }
         }, TB.settings.bbCheckTimeoutMs);
       } else if (TB.settings.botBouncerCheckEnabled && !subreddit) {
@@ -147,12 +147,14 @@
     S.bbCheckResult = safe;
     if (S.bbCheckTimer) { clearTimeout(S.bbCheckTimer); S.bbCheckTimer = null; }
     if (!safe) S.abortSubmission = true;
-    if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha) TB.finalDecision();
+    if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha && (!S.turnstileDetected || S.turnstileCompleted)) TB.finalDecision();
   };
 
   // ─── Final Decision: Submit or Abort ───────────────────
   TB.finalDecision = function () {
     if (S.hasSubmittedCaptcha || !S.hasSolvedCaptcha) return;
+    // Wait for Turnstile if detected but not yet completed
+    if (S.turnstileDetected && !S.turnstileCompleted) return;
 
     if (!TB.settings.botBouncerCheckEnabled) { TB.submitCaptcha(); return; }
     if (S.abortSubmission || (S.bbCheckCompleted && !S.bbCheckResult)) {
@@ -221,7 +223,7 @@
             TB.notify('BB_LOG_ENTRY', {
               subreddit: subreddit, status: 'timeout', action: 'marked_unsafe_on_timeout',
             });
-            if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha) TB.finalDecision();
+            if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha && (!S.turnstileDetected || S.turnstileCompleted)) TB.finalDecision();
           }
         }, TB.settings.bbCheckTimeoutMs);
       } else if (TB.settings.botBouncerCheckEnabled && !subreddit) {

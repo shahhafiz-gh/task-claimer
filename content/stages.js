@@ -385,18 +385,96 @@
       try { submitBtn = document.querySelector(TB.settings.submitSelector); } catch (e) { /* */ }
     }
     if (!submitBtn) {
-      var kws = ['submit', 'send', 'confirm', 'done', 'verify', 'ok'];
+      // Priority: look for "Verify & accept" button first (current captcha UI)
       var allBtns = TB.getAllButtons(document.body);
-      for (var b = 0; b < allBtns.length; b++) {
-        if (!TB.isClickableButton(allBtns[b]) || TB.handled.has(allBtns[b])) continue;
-        var btnText = TB.getText(allBtns[b]);
-        if (kws.some(function (kw) { return btnText.includes(kw); })) { submitBtn = allBtns[b]; break; }
+      for (var v = 0; v < allBtns.length; v++) {
+        if (!TB.isClickableButton(allBtns[v]) || TB.handled.has(allBtns[v])) continue;
+        var vText = TB.getText(allBtns[v]);
+        if ((vText.includes('verify') && vText.includes('accept')) ||
+            vText === 'verify & accept' || vText === 'verify and accept') {
+          submitBtn = allBtns[v]; break;
+        }
+      }
+      // Fallback: keyword scan
+      if (!submitBtn) {
+        var kws = ['verify', 'submit', 'send', 'confirm', 'done', 'ok', 'accept'];
+        for (var b = 0; b < allBtns.length; b++) {
+          if (!TB.isClickableButton(allBtns[b]) || TB.handled.has(allBtns[b])) continue;
+          var btnText = TB.getText(allBtns[b]);
+          // Skip cancel/no/close buttons
+          if (btnText === 'cancel' || btnText === 'no' || btnText === 'close') continue;
+          if (kws.some(function (kw) { return btnText.includes(kw); })) { submitBtn = allBtns[b]; break; }
+        }
       }
     }
     S.storedSubmitBtn = submitBtn;
 
+    // Check for Cloudflare Turnstile widget
+    var turnstileEl = TB.detectTurnstile();
+    if (turnstileEl) {
+      S.turnstileDetected = true;
+      console.log('[TaskBot] 🔒 Cloudflare Turnstile detected — waiting for completion');
+      TB.notify('PUSH_LOG', {
+        level: 'info',
+        message: '🔒 Cloudflare Turnstile detected — waiting for auto-resolve',
+      });
+      if (TB.isTurnstileCompleted()) {
+        S.turnstileCompleted = true;
+        console.log('[TaskBot] ✅ Turnstile already completed');
+      } else {
+        TB.pollTurnstile();
+        return true; // Wait for Turnstile before finalDecision
+      }
+    }
+
     if (S.bbCheckCompleted) TB.finalDecision();
     return true;
+  };
+
+  // ─── Turnstile Polling ─────────────────────────────────
+  TB.pollTurnstile = function () {
+    if (S.turnstileTimer) clearInterval(S.turnstileTimer);
+    // Extend watchdog to allow Turnstile time to resolve
+    TB.startWatchdog('turnstile-wait', 35000);
+    var pollCount = 0;
+    var hasClicked = false;
+    var MAX_POLLS = 150; // 30 seconds at 200ms intervals
+
+    S.turnstileTimer = setInterval(function () {
+      pollCount++;
+
+      // After 800ms without auto-resolve, try clicking the widget
+      // This handles managed challenges that need a click to activate
+      if (!hasClicked && pollCount === 4) {
+        hasClicked = true;
+        TB.tryClickTurnstile();
+      }
+      // Retry click at 3s if still not resolved (widget may have loaded late)
+      if (hasClicked && pollCount === 15 && !TB.isTurnstileCompleted()) {
+        TB.tryClickTurnstile();
+      }
+
+      if (TB.isTurnstileCompleted()) {
+        clearInterval(S.turnstileTimer);
+        S.turnstileTimer = null;
+        S.turnstileCompleted = true;
+        console.log('[TaskBot] ✅ Turnstile completed after ' + (pollCount * 200) + 'ms');
+        TB.notify('PUSH_LOG', {
+          level: 'info',
+          message: '✅ Cloudflare Turnstile completed (' + (pollCount * 200) + 'ms)',
+        });
+        if (S.bbCheckCompleted) TB.finalDecision();
+      } else if (pollCount >= MAX_POLLS) {
+        clearInterval(S.turnstileTimer);
+        S.turnstileTimer = null;
+        console.warn('[TaskBot] ⏱️ Turnstile timeout after 30s');
+        TB.notify('PUSH_LOG', {
+          level: 'warn',
+          message: '⏱️ Cloudflare Turnstile timed out — aborting claim',
+        });
+        TB.abortClaim('Turnstile verification timed out');
+      }
+    }, 200);
   };
 
   // ─── Stage Watchdog ────────────────────────────────────
@@ -406,15 +484,16 @@
   // permanently dead when a claim attempt silently fails.
   var WATCHDOG_TIMEOUT_MS = 12000; // 12 seconds max per stage
 
-  TB.startWatchdog = function (stageName) {
+  TB.startWatchdog = function (stageName, timeoutMs) {
     TB.clearWatchdog();
     S.lastStageTransition = Date.now();
+    var timeout = timeoutMs || WATCHDOG_TIMEOUT_MS;
     S.stageWatchdog = setTimeout(function () {
       S.stageWatchdog = null;
       // Only fire if we're still in an intermediate state
       if (!S.isEnabled) return;
       if (S.hasSubmittedCaptcha || S.isVerifyingClaim) return; // these have their own timeouts
-      console.warn('[TaskBot] ⏰ WATCHDOG — stuck in stage "' + stageName + '" for ' + WATCHDOG_TIMEOUT_MS + 'ms, force-resetting');
+      console.warn('[TaskBot] ⏰ WATCHDOG — stuck in stage "' + stageName + '" for ' + timeout + 'ms, force-resetting');
       TB.notify('PUSH_LOG', {
         level: 'warn',
         message: '⏰ Watchdog reset — stuck at "' + stageName + '" stage, resuming monitoring',
@@ -445,7 +524,7 @@
           }
         }, 300);
       }
-    }, WATCHDOG_TIMEOUT_MS);
+}, timeout);
   };
 
   TB.clearWatchdog = function () {
@@ -475,6 +554,9 @@
     S.pendingCaptchaAnswer = null;
     S.storedCaptchaInput = null;
     S.storedSubmitBtn = null;
+    S.turnstileDetected = false;
+    S.turnstileCompleted = false;
+    if (S.turnstileTimer) { clearInterval(S.turnstileTimer); S.turnstileTimer = null; }
     S.lastStageTransition = 0;
     if (S.verifyTimer) { clearTimeout(S.verifyTimer); S.verifyTimer = null; }
     if (S.bbCheckTimer) { clearTimeout(S.bbCheckTimer); S.bbCheckTimer = null; }

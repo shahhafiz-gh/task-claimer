@@ -72,6 +72,64 @@ function addBBLog(entry) {
   });
 }
 
+// ─── Notification System ──────────────────────────────────────────
+const NOTIFICATION_URL_KEY = 'notification_urls';
+
+/**
+ * Show a desktop notification and optionally open/focus a tab.
+ * @param {string} title
+ * @param {string} message
+ * @param {string} notificationId
+ * @param {string} [targetUrl]
+ */
+function showNotification(title, message, notificationId, targetUrl) {
+  const id = notificationId || `task-${Date.now()}`;
+  
+  chrome.notifications.create(id, {
+    type: 'basic',
+    iconUrl: 'assets/icon128.png',
+    title: title || 'Task Auto Claimer',
+    message: message || '',
+    priority: 2
+  });
+
+  if (targetUrl) {
+    // Store URL for click handler
+    chrome.storage.local.get(NOTIFICATION_URL_KEY, (data) => {
+      const urls = data[NOTIFICATION_URL_KEY] || {};
+      urls[id] = targetUrl;
+      chrome.storage.local.set({ [NOTIFICATION_URL_KEY]: urls });
+    });
+
+    // Auto-open logic as requested
+    chrome.tabs.create({ url: targetUrl });
+  }
+}
+
+// Interaction: Handle notification click
+chrome.notifications.onClicked.addListener((id) => {
+  chrome.storage.local.get(NOTIFICATION_URL_KEY, (data) => {
+    const urls = data[NOTIFICATION_URL_KEY] || {};
+    const url = urls[id];
+    if (url) {
+      // Focus existing tab with that URL or open new one
+      chrome.tabs.query({}, (tabs) => {
+        const existingTab = tabs.find(t => t.url && t.url.includes(url));
+        if (existingTab) {
+          chrome.tabs.update(existingTab.id, { active: true });
+          chrome.windows.update(existingTab.windowId, { focused: true });
+        } else {
+          chrome.tabs.create({ url });
+        }
+        
+        // Clean up stored URL
+        delete urls[id];
+        chrome.storage.local.set({ [NOTIFICATION_URL_KEY]: urls });
+      });
+    }
+  });
+});
+
 // ─── BotBouncer In-Memory Cache (hot-path within a SW session) ────
 // This is a fast short-circuit. Chrome can kill and restart the service
 // worker at any time, so we ALWAYS back reads up with chrome.storage.local.
@@ -420,8 +478,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       return true;
 
-    case 'TASK_CLAIMED':
-      addLog('success', `🎉 Task claimed! Captcha: ${payload.captchaExpression || 'N/A'} = ${payload.captchaAnswer || '?'}${payload.subreddit ? ` | r/${payload.subreddit}` : ''}`);
+    case 'TASK_CLAIMED': {
+      const claimMsg = `🎉 Task claimed! Captcha: ${payload.captchaExpression || 'N/A'} = ${payload.captchaAnswer || '?'}${payload.subreddit ? ` | r/${payload.subreddit}` : ''}`;
+      addLog('success', claimMsg);
+      
+      // Trigger notification for success (opens dashboard)
+      showNotification('Task Claimed!', claimMsg, `claim-${Date.now()}`, 'https://www.reddit.com/notifications');
       chrome.storage.local.get('state', ({ state }) => {
         const updated = {
           ...state,
@@ -437,9 +499,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       });
       return true;
+    }
 
-    case 'TASK_CLAIM_FAILED':
-      addLog('error', `❌ Claim FAILED${payload?.subreddit ? ` for r/${payload.subreddit}` : ''} — ${payload?.reason || 'unknown error'}`);
+    case 'TASK_CLAIM_FAILED': {
+      const failMsg = `❌ Claim FAILED${payload?.subreddit ? ` for r/${payload.subreddit}` : ''} — ${payload?.reason || 'unknown error'}`;
+      addLog('error', failMsg);
+
+      // Trigger notification for failure
+      showNotification('Claim Failed', failMsg, `fail-${Date.now()}`);
       chrome.storage.local.get('state', ({ state }) => {
         const updated = {
           ...state,
@@ -451,6 +518,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       });
       return true;
+    }
 
     case 'TASK_SKIPPED_BOTBOUNCER':
       addLog('warn', `⛔ Skipped task from r/${payload.subreddit || 'unknown'} — BotBouncer detected`);
@@ -504,6 +572,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
       });
       return true;
+
+    case 'SHOW_NOTIFICATION': {
+      const { title, message, notificationId, url } = payload;
+      showNotification(title, message, notificationId, url);
+      sendResponse({ ok: true });
+      return false;
+    }
 
     default:
       sendResponse({ error: 'Unknown message type' });

@@ -5,7 +5,8 @@
   "description": "Accept First, Verify Later — ultra-fast task claiming (<50ms) with parallel BotBouncer protection.",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "notifications"
   ],
   "background": {
     "service_worker": "background.js"

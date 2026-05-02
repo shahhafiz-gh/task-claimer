@@ -25,7 +25,7 @@
         console.log('[TaskBot] 🔄 SPA navigation detected: ' + currentUrl);
         if (currentUrl.includes('/tasks')) {
           // We're on the tasks page — reset and start scanning for new tasks
-          if (!S.hasClickedAccept && !S.isVerifyingClaim && !S.hasSubmittedCaptcha) {
+          if (!S.hasClickedAccept && !S.isVerifyingClaim && !S.hasClickedConfirm) {
             TB.resetState();
             TB.scheduleRescan();
           }
@@ -33,7 +33,7 @@
       }
 
       // Fast path: scan addedNodes directly for ALL accept buttons and click them all
-      if (!S.hasClickedAccept && !S.isVerifyingClaim && !S.hasSubmittedCaptcha) {
+      if (!S.hasClickedAccept && !S.isVerifyingClaim && !S.hasClickedConfirm) {
         var foundButtons = [];
         for (var i = 0; i < mutations.length; i++) {
           var added = mutations[i].addedNodes;
@@ -66,13 +66,13 @@
         if (TB.checkMutationsForSuccessSignal(mutations)) TB.confirmClaimSuccess();
         return;
       }
-      if (S.hasSubmittedCaptcha) return;
+      if (S.hasClickedConfirm) return; // After confirm, we're in verify mode — no more stages to run
 
-      // Debounced: confirmation/captcha stages
+      // Debounced: confirmation stage
       if (!S.stageRAF) {
         S.stageRAF = requestAnimationFrame(function () {
           S.stageRAF = null;
-          if (S.isEnabled && !S.isVerifyingClaim && !S.hasSubmittedCaptcha) {
+          if (S.isEnabled && !S.isVerifyingClaim && !S.hasClickedConfirm) {
             TB.runCurrentStage();
           }
         });
@@ -105,7 +105,7 @@
       // Stuck state detection — if we've been in an intermediate state
       // for over 15 seconds with no watchdog firing, force reset here too.
       // This is a safety net in case the watchdog was somehow cleared.
-      if (S.hasClickedAccept && !S.hasSubmittedCaptcha && !S.isVerifyingClaim) {
+      if (S.hasClickedAccept && !S.hasClickedConfirm && !S.isVerifyingClaim) {
         if (S.lastStageTransition > 0 && (Date.now() - S.lastStageTransition) > 15000) {
           console.warn('[TaskBot] ⏰ Idle scan detected stuck state (' +
             (Date.now() - S.lastStageTransition) + 'ms since last transition), force-resetting');
@@ -134,7 +134,7 @@
         }
         return; // Still in a claim attempt, don't scan for new tasks
       }
-      if (S.isVerifyingClaim || S.hasSubmittedCaptcha) return;
+      if (S.isVerifyingClaim || S.hasClickedConfirm) return;
 
       // Quick DOM scan for accept buttons
       TB.rebuildTaskQueue();

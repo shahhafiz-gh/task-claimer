@@ -1,6 +1,10 @@
 /**
  * Task Auto Claimer — BotBouncer Integration
- * Fast-path accept, BB check firing, result handling, final decision.
+ * Fast-path accept, BB check firing, result handling.
+ *
+ * After EarnTask update: No captcha step. The BB check gates the
+ * confirmation click ("Yes, accept"). If BB says unsafe, we click
+ * Cancel instead of "Yes, accept".
  */
 (function () {
   'use strict';
@@ -69,7 +73,8 @@
             TB.notify('BB_LOG_ENTRY', {
               subreddit: subreddit, status: 'timeout', action: 'marked_unsafe_on_timeout',
             });
-            if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha && (!S.turnstileDetected || S.turnstileCompleted)) TB.finalDecision();
+            // BB timed out — trigger confirmation stage which will now see abortSubmission=true
+            TB.runCurrentStage();
           }
         }, TB.settings.bbCheckTimeoutMs);
       } else if (TB.settings.botBouncerCheckEnabled && !subreddit) {
@@ -147,25 +152,11 @@
     S.bbCheckResult = safe;
     if (S.bbCheckTimer) { clearTimeout(S.bbCheckTimer); S.bbCheckTimer = null; }
     if (!safe) S.abortSubmission = true;
-    if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha && (!S.turnstileDetected || S.turnstileCompleted)) TB.finalDecision();
-  };
 
-  // ─── Final Decision: Submit or Abort ───────────────────
-  TB.finalDecision = function () {
-    if (S.hasSubmittedCaptcha || !S.hasSolvedCaptcha) return;
-    // Wait for Turnstile if detected but not yet completed
-    if (S.turnstileDetected && !S.turnstileCompleted) return;
-
-    if (!TB.settings.botBouncerCheckEnabled) { TB.submitCaptcha(); return; }
-    if (S.abortSubmission || (S.bbCheckCompleted && !S.bbCheckResult)) {
-      TB.silentAbort(S.pendingSubreddit || 'unknown'); return;
-    }
-    if (S.bbCheckCompleted && S.bbCheckResult === true) { TB.submitCaptcha(); return; }
-    if (!S.bbCheckCompleted) {
-      TB.notify('BB_LOG_ENTRY', {
-        subreddit: S.pendingSubreddit, status: 'timeout', action: 'aborted_timeout_strict',
-      });
-      TB.silentAbort(S.pendingSubreddit || 'unknown');
+    // BB check completed — re-trigger the stage router so tryConfirmation can proceed
+    // (it was waiting for BB to complete before clicking "Yes, accept")
+    if (!S.hasClickedConfirm) {
+      TB.runCurrentStage();
     }
   };
 
@@ -223,7 +214,8 @@
             TB.notify('BB_LOG_ENTRY', {
               subreddit: subreddit, status: 'timeout', action: 'marked_unsafe_on_timeout',
             });
-            if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha && (!S.turnstileDetected || S.turnstileCompleted)) TB.finalDecision();
+            // BB timed out — re-trigger stage so tryConfirmation sees the abort flag
+            TB.runCurrentStage();
           }
         }, TB.settings.bbCheckTimeoutMs);
       } else if (TB.settings.botBouncerCheckEnabled && !subreddit) {
@@ -239,40 +231,5 @@
       }
       TB.runCurrentStage();
     });
-  };
-
-  // ─── Submit Captcha ────────────────────────────────────
-  TB.submitCaptcha = function () {
-    if (S.hasSubmittedCaptcha) return;
-    if (TB.settings.botBouncerCheckEnabled) {
-      if (!S.bbCheckCompleted || S.bbCheckResult !== true || S.abortSubmission) {
-        TB.silentAbort(S.pendingSubreddit || 'unknown'); return;
-      }
-    }
-
-    S.hasSubmittedCaptcha = true;
-    if (S.storedSubmitBtn && TB.isClickableButton(S.storedSubmitBtn)) {
-      TB.handled.add(S.storedSubmitBtn);
-      S.storedSubmitBtn.click();
-    } else if (S.storedCaptchaInput) {
-      TB.simulateEnter(S.storedCaptchaInput);
-    }
-
-    S.isVerifyingClaim = true;
-    if (TB.detectSuccessSignal()) { TB.confirmClaimSuccess(); return; }
-    var err = TB.detectErrorToast();
-    if (err) { TB.abortClaim(err); return; }
-
-    S.verifyTimer = setTimeout(function () {
-      S.verifyTimer = null;
-      if (!S.isVerifyingClaim) return;
-      if (TB.detectSuccessSignal()) { TB.confirmClaimSuccess(); return; }
-      var finalErr = TB.detectErrorToast();
-      if (finalErr) { TB.abortClaim(finalErr); return; }
-      // Assume success if no error toast after timeout — sometimes the success
-      // signal is different in the new UI
-      console.log('[TaskBot] ⏱️ Verify timeout — assuming success (no error toast detected)');
-      TB.confirmClaimSuccess();
-    }, 4000);
   };
 })();

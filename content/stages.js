@@ -1,6 +1,10 @@
 /**
  * Task Auto Claimer — Stage Pipeline & Task Queue
- * Stages: Accept → Confirm → Captcha → Submit/Abort
+ * Stages: Accept → Confirm ("Yes, accept") → DONE (no captcha)
+ *
+ * After the EarnTask update, there is no captcha step.
+ * Clicking "Accept Task" opens a confirmation popup.
+ * Clicking "Yes, accept" in the popup claims the task immediately.
  */
 (function () {
   'use strict';
@@ -129,8 +133,6 @@
     if (S.verifyTimer) { clearTimeout(S.verifyTimer); S.verifyTimer = null; }
     S.isVerifyingClaim = false;
     TB.notify('TASK_CLAIMED', {
-      captchaExpression: S.pendingCaptchaText,
-      captchaAnswer: S.pendingCaptchaAnswer,
       subreddit: S.currentSubreddit,
     });
     if (S.currentSubreddit) {
@@ -197,7 +199,7 @@
       (function (delay) {
         setTimeout(function () {
           if (!S.isEnabled) return;
-          if (S.hasClickedAccept || S.isVerifyingClaim || S.hasSubmittedCaptcha) return;
+          if (S.hasClickedAccept || S.isVerifyingClaim || S.hasSubmittedConfirm) return;
           TB.rebuildTaskQueue();
           if (S.taskQueue.length > 0) {
             console.log('[TaskBot] 🔍 Rescan found ' + S.taskQueue.length + ' task(s) after ' + delay + 'ms');
@@ -295,10 +297,26 @@
     return true;
   };
 
-  // ─── Stage B: Confirmation Modal ───────────────────────
+  // ─── Stage B: Confirmation Modal ("Yes, accept") ───────
+  // After the EarnTask update, clicking "Yes, accept" in the popup
+  // is the FINAL step — no captcha follows. The task is claimed
+  // immediately after this click.
   TB.tryConfirmation = function () {
     if (!S.hasClickedAccept || S.hasClickedConfirm) return false;
     if (S.abortSubmission) { TB.silentAbort(S.pendingSubreddit || 'unknown'); return false; }
+
+    // ── BB Gate: Wait for BB check before confirming ──
+    // If BB check is enabled and not yet completed, don't confirm yet.
+    // The BB result handler or timeout will re-trigger runCurrentStage.
+    if (TB.settings.botBouncerCheckEnabled && !S.bbCheckCompleted) {
+      return false; // Wait — BB check still in progress
+    }
+
+    // If BB check completed and subreddit is unsafe, abort
+    if (TB.settings.botBouncerCheckEnabled && S.bbCheckCompleted && !S.bbCheckResult) {
+      TB.silentAbort(S.pendingSubreddit || 'unknown');
+      return false;
+    }
 
     var buttons = TB.getAllButtons(document.body);
     for (var i = 0; i < buttons.length; i++) {
@@ -307,14 +325,35 @@
       var text = TB.getText(btn);
       if (text === 'cancel' || text === 'no' || text === 'close') continue;
 
-      // Pattern 1: "yes" + confirmation word
+      // Pattern 1: "yes" + confirmation word (e.g. "Yes, accept")
       if (text.includes('yes') && (text.includes('accept') || text.includes('claim') ||
         text.includes('confirm') || text.includes('continue'))) {
         S.hasClickedConfirm = true;
         TB.handled.add(btn); btn.click();
+        console.log('[TaskBot] ✅ Clicked confirmation: "' + text + '"');
         TB.notify('STAGE_CONFIRM', { buttonText: text });
         TB.startWatchdog('confirm');
-        TB.runCurrentStage();
+
+        // No captcha step anymore — go straight to verification
+        S.isVerifyingClaim = true;
+
+        // Check for immediate success or error
+        if (TB.detectSuccessSignal()) { TB.confirmClaimSuccess(); return true; }
+        var err = TB.detectErrorToast();
+        if (err) { TB.abortClaim(err); return true; }
+
+        // Wait for success signal from DOM mutations (observer will detect it)
+        S.verifyTimer = setTimeout(function () {
+          S.verifyTimer = null;
+          if (!S.isVerifyingClaim) return;
+          if (TB.detectSuccessSignal()) { TB.confirmClaimSuccess(); return; }
+          var finalErr = TB.detectErrorToast();
+          if (finalErr) { TB.abortClaim(finalErr); return; }
+          // Assume success if no error toast after timeout
+          console.log('[TaskBot] ⏱️ Verify timeout — assuming success (no error toast detected)');
+          TB.confirmClaimSuccess();
+        }, 4000);
+
         return true;
       }
 
@@ -328,160 +367,38 @@
         text.includes('yes,') || text.includes('yes '))) {
         S.hasClickedConfirm = true;
         TB.handled.add(btn); btn.click();
+        console.log('[TaskBot] ✅ Clicked confirmation: "' + text + '"');
         TB.notify('STAGE_CONFIRM', { buttonText: text });
         TB.startWatchdog('confirm');
-        TB.runCurrentStage();
+
+        // No captcha step anymore — go straight to verification
+        S.isVerifyingClaim = true;
+
+        // Check for immediate success or error
+        if (TB.detectSuccessSignal()) { TB.confirmClaimSuccess(); return true; }
+        var err2 = TB.detectErrorToast();
+        if (err2) { TB.abortClaim(err2); return true; }
+
+        // Wait for success signal
+        S.verifyTimer = setTimeout(function () {
+          S.verifyTimer = null;
+          if (!S.isVerifyingClaim) return;
+          if (TB.detectSuccessSignal()) { TB.confirmClaimSuccess(); return; }
+          var finalErr = TB.detectErrorToast();
+          if (finalErr) { TB.abortClaim(finalErr); return; }
+          console.log('[TaskBot] ⏱️ Verify timeout — assuming success (no error toast detected)');
+          TB.confirmClaimSuccess();
+        }, 4000);
+
         return true;
       }
     }
     return false;
   };
 
-  // ─── Stage C: Captcha ──────────────────────────────────
-  TB.tryCaptcha = function () {
-    if (!S.hasClickedConfirm || S.hasSolvedCaptcha) return false;
-    if (S.abortSubmission) { TB.silentAbort(S.pendingSubreddit || 'unknown'); return false; }
-
-    var captchaEl = null;
-    if (TB.settings.captchaSelector) {
-      try { captchaEl = document.querySelector(TB.settings.captchaSelector); } catch (e) { /* */ }
-    }
-    if (!captchaEl) captchaEl = TB.findMathElement(document.body);
-    if (!captchaEl) return false;
-
-    var captchaText = captchaEl.textContent.trim();
-    var answer = TB.solveAddition(captchaText);
-    if (answer === null) return false;
-
-    var captchaInput = null;
-    if (TB.settings.captchaInputSelector) {
-      try { captchaInput = document.querySelector(TB.settings.captchaInputSelector); } catch (e) { /* */ }
-    }
-    if (!captchaInput) {
-      var root = captchaEl.closest(
-        '[role="dialog"], .modal, .dialog, .popup, .overlay, ' +
-        '[class*="modal"], [class*="dialog"], [class*="captcha"], form'
-      ) || document.body;
-      captchaInput = root.querySelector(
-        'input[type="text"], input[type="number"], input.captcha-input, ' +
-        'input:not([type="hidden"]):not([type="submit"]):not([type="button"])' +
-        ':not([type="checkbox"]):not([type="radio"])'
-      );
-    }
-    if (!captchaInput) captchaInput = document.querySelector('input[type="text"], input[type="number"]');
-    if (!captchaInput) return false;
-
-    S.hasSolvedCaptcha = true;
-    TB.handled.add(captchaEl);
-    TB.handled.add(captchaInput);
-    TB.fillInput(captchaInput, answer);
-    S.pendingCaptchaText = captchaText;
-    S.pendingCaptchaAnswer = answer;
-    S.storedCaptchaInput = captchaInput;
-
-    // Find submit button
-    var submitBtn = null;
-    if (TB.settings.submitSelector) {
-      try { submitBtn = document.querySelector(TB.settings.submitSelector); } catch (e) { /* */ }
-    }
-    if (!submitBtn) {
-      // Priority: look for "Verify & accept" button first (current captcha UI)
-      var allBtns = TB.getAllButtons(document.body);
-      for (var v = 0; v < allBtns.length; v++) {
-        if (!TB.isClickableButton(allBtns[v]) || TB.handled.has(allBtns[v])) continue;
-        var vText = TB.getText(allBtns[v]);
-        if ((vText.includes('verify') && vText.includes('accept')) ||
-            vText === 'verify & accept' || vText === 'verify and accept') {
-          submitBtn = allBtns[v]; break;
-        }
-      }
-      // Fallback: keyword scan
-      if (!submitBtn) {
-        var kws = ['verify', 'submit', 'send', 'confirm', 'done', 'ok', 'accept'];
-        for (var b = 0; b < allBtns.length; b++) {
-          if (!TB.isClickableButton(allBtns[b]) || TB.handled.has(allBtns[b])) continue;
-          var btnText = TB.getText(allBtns[b]);
-          // Skip cancel/no/close buttons
-          if (btnText === 'cancel' || btnText === 'no' || btnText === 'close') continue;
-          if (kws.some(function (kw) { return btnText.includes(kw); })) { submitBtn = allBtns[b]; break; }
-        }
-      }
-    }
-    S.storedSubmitBtn = submitBtn;
-
-    // Check for Cloudflare Turnstile widget
-    var turnstileEl = TB.detectTurnstile();
-    if (turnstileEl) {
-      S.turnstileDetected = true;
-      console.log('[TaskBot] 🔒 Cloudflare Turnstile detected — waiting for completion');
-      TB.notify('PUSH_LOG', {
-        level: 'info',
-        message: '🔒 Cloudflare Turnstile detected — waiting for auto-resolve',
-      });
-      if (TB.isTurnstileCompleted()) {
-        S.turnstileCompleted = true;
-        console.log('[TaskBot] ✅ Turnstile already completed');
-      } else {
-        TB.pollTurnstile();
-        return true; // Wait for Turnstile before finalDecision
-      }
-    }
-
-    if (S.bbCheckCompleted) TB.finalDecision();
-    return true;
-  };
-
-  // ─── Turnstile Polling ─────────────────────────────────
-  TB.pollTurnstile = function () {
-    if (S.turnstileTimer) clearInterval(S.turnstileTimer);
-    // Extend watchdog to allow Turnstile time to resolve
-    TB.startWatchdog('turnstile-wait', 35000);
-    var pollCount = 0;
-    var hasClicked = false;
-    var MAX_POLLS = 150; // 30 seconds at 200ms intervals
-
-    S.turnstileTimer = setInterval(function () {
-      pollCount++;
-
-      // After 800ms without auto-resolve, try clicking the widget
-      // This handles managed challenges that need a click to activate
-      if (!hasClicked && pollCount === 4) {
-        hasClicked = true;
-        TB.tryClickTurnstile();
-      }
-      // Retry click at 3s if still not resolved (widget may have loaded late)
-      if (hasClicked && pollCount === 15 && !TB.isTurnstileCompleted()) {
-        TB.tryClickTurnstile();
-      }
-
-      if (TB.isTurnstileCompleted()) {
-        clearInterval(S.turnstileTimer);
-        S.turnstileTimer = null;
-        S.turnstileCompleted = true;
-        console.log('[TaskBot] ✅ Turnstile completed after ' + (pollCount * 200) + 'ms');
-        TB.notify('PUSH_LOG', {
-          level: 'info',
-          message: '✅ Cloudflare Turnstile completed (' + (pollCount * 200) + 'ms)',
-        });
-        if (S.bbCheckCompleted) TB.finalDecision();
-      } else if (pollCount >= MAX_POLLS) {
-        clearInterval(S.turnstileTimer);
-        S.turnstileTimer = null;
-        console.warn('[TaskBot] ⏱️ Turnstile timeout after 30s');
-        TB.notify('PUSH_LOG', {
-          level: 'warn',
-          message: '⏱️ Cloudflare Turnstile timed out — aborting claim',
-        });
-        TB.abortClaim('Turnstile verification timed out');
-      }
-    }, 200);
-  };
-
   // ─── Stage Watchdog ────────────────────────────────────
-  // If we're stuck in any intermediate stage (accept clicked but no confirm,
-  // confirm clicked but no captcha, etc.) for more than WATCHDOG_TIMEOUT_MS,
-  // force-reset and resume monitoring. This prevents the bot from going
-  // permanently dead when a claim attempt silently fails.
+  // If we're stuck in any intermediate stage for too long,
+  // force-reset and resume monitoring.
   var WATCHDOG_TIMEOUT_MS = 12000; // 12 seconds max per stage
 
   TB.startWatchdog = function (stageName, timeoutMs) {
@@ -490,9 +407,8 @@
     var timeout = timeoutMs || WATCHDOG_TIMEOUT_MS;
     S.stageWatchdog = setTimeout(function () {
       S.stageWatchdog = null;
-      // Only fire if we're still in an intermediate state
       if (!S.isEnabled) return;
-      if (S.hasSubmittedCaptcha || S.isVerifyingClaim) return; // these have their own timeouts
+      if (S.isVerifyingClaim) return; // verification has its own timeout
       console.warn('[TaskBot] ⏰ WATCHDOG — stuck in stage "' + stageName + '" for ' + timeout + 'ms, force-resetting');
       TB.notify('PUSH_LOG', {
         level: 'warn',
@@ -504,7 +420,6 @@
       TB.resetState();
 
       if (pendingCount > 0) {
-        // Still have bulk tasks pending — try next modal
         S.bulkAcceptPending = pendingCount;
         console.log('[TaskBot] 🔄 Watchdog: ' + pendingCount + ' bulk task(s) still pending');
         setTimeout(function () {
@@ -514,7 +429,6 @@
           TB.deferPostClickFromModal();
         }, 300);
       } else {
-        // Navigate back to tasks to keep monitoring
         setTimeout(function () {
           TB.rebuildTaskQueue();
           if (S.taskQueue.length > 0) {
@@ -524,7 +438,7 @@
           }
         }, 300);
       }
-}, timeout);
+    }, timeout);
   };
 
   TB.clearWatchdog = function () {
@@ -532,11 +446,12 @@
   };
 
   // ─── Stage Router ──────────────────────────────────────
+  // Simplified: Only 2 stages now (Accept → Confirm)
+  // No captcha stage needed after EarnTask update.
   TB.runCurrentStage = function () {
-    if (!S.isEnabled || S.isVerifyingClaim || S.hasSubmittedCaptcha) return;
+    if (!S.isEnabled || S.isVerifyingClaim || S.hasClickedConfirm) return;
     if (!S.hasClickedAccept) { TB.tryAcceptTask(); return; }
     if (!S.hasClickedConfirm) { TB.tryConfirmation(); return; }
-    if (!S.hasSolvedCaptcha) TB.tryCaptcha();
   };
 
   TB.resetState = function () {

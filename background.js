@@ -479,7 +479,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case 'TASK_CLAIMED': {
-      const claimMsg = `🎉 Task claimed! Captcha: ${payload.captchaExpression || 'N/A'} = ${payload.captchaAnswer || '?'}${payload.subreddit ? ` | r/${payload.subreddit}` : ''}`;
+      const claimMsg = `🎉 Task claimed!${payload.subreddit ? ` | r/${payload.subreddit}` : ''}`;
       addLog('success', claimMsg);
       
       // Trigger notification for success (opens dashboard)
@@ -489,9 +489,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ...state,
           totalClaimed: (state.totalClaimed || 0) + 1,
           lastTaskClaimed: 'Task Claimed',
-          lastCaptchaSolved: payload.captchaExpression || null,
           lastClaimTimestamp: Date.now(),
-          lastStage: 'captcha',
+          lastStage: 'confirmed',
           lastStageTimestamp: Date.now(),
         };
         chrome.storage.local.set({ state: updated }, () => {

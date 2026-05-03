@@ -32,25 +32,25 @@
         }
       }
 
-      // Fast path: scan addedNodes directly for ALL accept buttons and click them all
+      // Fast path: scan addedNodes for accept buttons — click only the FIRST one (sequential)
       if (!S.hasClickedAccept && !S.isVerifyingClaim && !S.hasClickedConfirm) {
-        var foundButtons = [];
+        var firstFound = null;
+        var allFound = [];
         for (var i = 0; i < mutations.length; i++) {
           var added = mutations[i].addedNodes;
           for (var j = 0; j < added.length; j++) {
             if (added[j].nodeType !== 1) continue;
             var btns = TB.fastFindAllAcceptButtons(added[j]);
             for (var k = 0; k < btns.length; k++) {
-              foundButtons.push(btns[k]);
+              if (!firstFound) firstFound = btns[k];
+              allFound.push(btns[k]);
             }
           }
         }
-        if (foundButtons.length > 0) {
-          if (foundButtons.length === 1) {
-            TB.fastClickAccept(foundButtons[0]);
-          } else {
-            TB.fastClickAllAccept(foundButtons);
-          }
+        if (firstFound) {
+          TB.fastClickAccept(firstFound);
+          // Pre-warm BB cache for the rest so they're ready when we get to them
+          if (allFound.length > 1) TB.preWarmBBCache(allFound);
           return;
         }
       }
@@ -114,21 +114,13 @@
             message: '⏰ Idle scan: stuck state detected, force-resetting to monitor',
           });
 
-          var pendingCount = S.bulkAcceptPending > 1 ? S.bulkAcceptPending - 1 : 0;
           TB.resetState();
 
-          if (pendingCount > 0) {
-            S.bulkAcceptPending = pendingCount;
-            S.hasClickedAccept = true;
-            TB.startWatchdog('bulk-next');
-            TB.deferPostClickFromModal();
+          TB.rebuildTaskQueue();
+          if (S.taskQueue.length > 0) {
+            TB.runCurrentStage();
           } else {
-            TB.rebuildTaskQueue();
-            if (S.taskQueue.length > 0) {
-              TB.runCurrentStage();
-            } else {
-              TB.navigateToTasks();
-            }
+            TB.navigateToTasks();
           }
           return;
         }

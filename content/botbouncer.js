@@ -2,6 +2,7 @@
  * Task Auto Claimer — BotBouncer Integration
  * Fast-path accept, BB check firing, result handling.
  *
+ * SEQUENTIAL mode: Click ONE accept button at a time.
  * After EarnTask update: No captcha step. The BB check gates the
  * confirmation click ("Yes, accept"). If BB says unsafe, we click
  * Cancel instead of "Yes, accept".
@@ -17,9 +18,7 @@
     if (el.tagName !== 'BUTTON' && el.getAttribute('role') !== 'button') return false;
     if (el.offsetParent === null && el.offsetHeight === 0) return false;
     var text = (el.textContent || '').toLowerCase().trim();
-    // Match "Accept Task", "accept task", etc.
     if (text.includes('accept') && text.includes('task')) return true;
-    // Also match standalone "Accept" inside task card containers
     if (text === 'accept' || text === 'accept task' || text === 'claim' || text === 'claim task') return true;
     if (TB.settings.claimSelector) {
       try { if (el.matches(TB.settings.claimSelector)) return true; } catch (e) { }
@@ -27,6 +26,7 @@
     return false;
   };
 
+  // Find the first accept button in a DOM node (used by observer fast-path)
   TB.fastFindAcceptButton = function (node) {
     if (TB.isAcceptButton(node)) return node;
     if (node.getElementsByTagName) {
@@ -38,6 +38,7 @@
     return null;
   };
 
+  // Find all accept buttons in a DOM node (used by observer — but only first is clicked)
   TB.fastFindAllAcceptButtons = function (node) {
     var results = [];
     if (TB.isAcceptButton(node)) results.push(node);
@@ -51,6 +52,7 @@
   };
 
   // ─── Deferred Post-Click Work ──────────────────────────
+  // Extracts subreddit from the task card and fires BB check.
   TB.deferPostClick = function (btn) {
     queueMicrotask(function () {
       var subreddit = TB.extractSubreddit(btn);
@@ -73,7 +75,7 @@
             TB.notify('BB_LOG_ENTRY', {
               subreddit: subreddit, status: 'timeout', action: 'marked_unsafe_on_timeout',
             });
-            // BB timed out — trigger confirmation stage which will now see abortSubmission=true
+            // BB timed out — re-trigger stage so tryConfirmation sees the abort flag
             TB.runCurrentStage();
           }
         }, TB.settings.bbCheckTimeoutMs);
@@ -85,6 +87,7 @@
           subreddit: 'unknown', status: 'unsafe', action: 'no_subreddit_strict_abort',
         });
       } else {
+        // BB disabled — mark as safe
         S.bbCheckCompleted = true;
         S.bbCheckResult = true;
       }
@@ -92,33 +95,23 @@
     });
   };
 
+  // ─── Fast-Path Accept (Single) — Observer calls this ───
   TB.fastClickAccept = function (btn) {
     if (S.hasClickedAccept) return;
     S.hasClickedAccept = true;
     TB.handled.add(btn);
     btn.click();
     console.log('[TaskBot] ⚡ FAST-PATH Accept clicked — "' + TB.getText(btn) + '"');
-    S.bulkAcceptPending = 1;
+    TB.startWatchdog('accept');
     TB.deferPostClick(btn);
   };
 
+  // When observer finds multiple accept buttons, click only the FIRST one.
+  // Sequential processing is more reliable than bulk-clicking.
   TB.fastClickAllAccept = function (buttons) {
-    if (S.hasClickedAccept) return;
-    if (buttons.length === 0) return;
-    S.hasClickedAccept = true;
-
-    for (var i = 0; i < buttons.length; i++) {
-      TB.handled.add(buttons[i]);
-      buttons[i].click();
-      console.log('[TaskBot] ⚡ FAST-PATH Accept clicked (' + (i + 1) + '/' + buttons.length + ') — "' + TB.getText(buttons[i]) + '"');
-    }
-
-    S.bulkAcceptPending = buttons.length;
-    console.log('[TaskBot] ⚡ FAST-PATH Bulk-clicked ' + buttons.length + ' accept button(s)');
-    // Pre-warm BB cache for all subreddits
-    TB.preWarmBBCache(buttons);
-    // Full post-click processing for the first button
-    TB.deferPostClick(buttons[0]);
+    if (S.hasClickedAccept || buttons.length === 0) return;
+    // Click only the first button — the rest stay in the queue for later
+    TB.fastClickAccept(buttons[0]);
   };
 
   // ─── BB Check ─────────────────────────────────────────
@@ -154,16 +147,18 @@
     if (!safe) S.abortSubmission = true;
 
     // BB check completed — re-trigger the stage router so tryConfirmation can proceed
-    // (it was waiting for BB to complete before clicking "Yes, accept")
-    if (!S.hasClickedConfirm) {
+    if (!S.hasClickedConfirm && S.hasClickedAccept) {
+      console.log('[TaskBot] 🛡️ BB check result for r/' + subreddit + ': ' + (safe ? 'SAFE ✓' : 'UNSAFE ✗'));
       TB.runCurrentStage();
     }
   };
 
-  // ─── Pre-warm BB Cache for Bulk Accept ──────────────────
+  // ─── Pre-warm BB Cache ─────────────────────────────────
+  // Fire BB checks for all visible tasks so results are cached
+  // by the time we get to them sequentially.
   TB.preWarmBBCache = function (buttons) {
     if (!TB.settings.botBouncerCheckEnabled) return;
-    for (var i = 1; i < buttons.length; i++) {
+    for (var i = 0; i < buttons.length; i++) {
       var subreddit = TB.extractSubreddit(buttons[i]);
       if (subreddit) {
         try {
@@ -176,9 +171,9 @@
     }
   };
 
-  // ─── Deferred Post-Click from Modal (Bulk Mode) ────────
-  // Used when processing subsequent modals after bulk-clicking.
-  // Extracts subreddit from the visible modal and fires BB check.
+  // ─── Deferred Post-Click from Modal ────────────────────
+  // Legacy — kept for compatibility. Extracts subreddit from
+  // a visible modal and fires BB check.
   TB.deferPostClickFromModal = function () {
     queueMicrotask(function () {
       var subreddit = null;
@@ -199,7 +194,7 @@
       S.pendingSubreddit = subreddit;
 
       TB.notify('STAGE_ACCEPT', {
-        buttonText: '(bulk-next)',
+        buttonText: '(from-modal)',
         subreddit: subreddit || 'unknown',
       });
 
@@ -214,7 +209,6 @@
             TB.notify('BB_LOG_ENTRY', {
               subreddit: subreddit, status: 'timeout', action: 'marked_unsafe_on_timeout',
             });
-            // BB timed out — re-trigger stage so tryConfirmation sees the abort flag
             TB.runCurrentStage();
           }
         }, TB.settings.bbCheckTimeoutMs);

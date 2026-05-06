@@ -27,6 +27,7 @@ const DEFAULT_STATE = {
   // UI settings
   soundEnabled: true,
   safeModeEnabled: false,
+  desktopNotificationsEnabled: true,
   // BotBouncer settings
   botBouncerCheckEnabled: true,
   // BB check settings — optimized for speed
@@ -100,9 +101,6 @@ function showNotification(title, message, notificationId, targetUrl) {
       urls[id] = targetUrl;
       chrome.storage.local.set({ [NOTIFICATION_URL_KEY]: urls });
     });
-
-    // Auto-open logic as requested
-    chrome.tabs.create({ url: targetUrl });
   }
 }
 
@@ -482,9 +480,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const claimMsg = `🎉 Task claimed!${payload.subreddit ? ` | r/${payload.subreddit}` : ''}`;
       addLog('success', claimMsg);
       
-      // Trigger notification for success (opens dashboard)
-      showNotification('Task Claimed!', claimMsg, `claim-${Date.now()}`, 'https://www.reddit.com/notifications');
       chrome.storage.local.get('state', ({ state }) => {
+        // Trigger notification for success (opens dashboard)
+        if (state?.desktopNotificationsEnabled !== false) {
+          showNotification('Task Claimed!', claimMsg, `claim-${Date.now()}`, 'https://www.reddit.com/notifications');
+        }
+
         const updated = {
           ...state,
           totalClaimed: (state.totalClaimed || 0) + 1,
@@ -504,9 +505,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const failMsg = `❌ Claim FAILED${payload?.subreddit ? ` for r/${payload.subreddit}` : ''} — ${payload?.reason || 'unknown error'}`;
       addLog('error', failMsg);
 
-      // Trigger notification for failure
-      showNotification('Claim Failed', failMsg, `fail-${Date.now()}`);
       chrome.storage.local.get('state', ({ state }) => {
+        // Trigger notification for failure
+        if (state?.desktopNotificationsEnabled !== false) {
+          showNotification('Claim Failed', failMsg, `fail-${Date.now()}`);
+        }
+
         const updated = {
           ...state,
           lastStage: 'claim_failed',

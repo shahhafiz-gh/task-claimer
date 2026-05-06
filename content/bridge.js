@@ -1,15 +1,17 @@
-/**
- * Task Auto Claimer — WebSocket Bridge (ISOLATED World)
- * ============================================================
- * Runs in the ISOLATED world (default content script world).
- * Bridges between the MAIN world interceptor and chrome.* APIs.
- *
- * Communication:
- *   MAIN world (interceptor.js) ←→ window.postMessage ←→ this bridge ←→ chrome.runtime
- */
+
 'use strict';
 
 (function () {
+
+  
+  function safeSendMessage(msg, callback) {
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) return; // context dead
+      chrome.runtime.sendMessage(msg, callback);
+    } catch (e) {
+      // Extension context invalidated — ignore
+    }
+  }
 
   // ─── Listen for messages from MAIN world interceptor ─────
   window.addEventListener('message', function (event) {
@@ -20,26 +22,28 @@
     switch (msg.type) {
       case 'LOG':
         // Forward log to background
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           type: 'PUSH_LOG',
           payload: { level: msg.data.level, message: '🌐 ' + msg.data.message },
-        }).catch(function () { });
+        });
         break;
 
       case 'USER_IDS':
         // Persist auto-captured user IDs
-        chrome.storage.local.get('wsConfig', function (data) {
-          if (chrome.runtime.lastError) return;
-          var cfg = data.wsConfig || {};
-          if (msg.data.clerkId) cfg.clerkId = msg.data.clerkId;
-          if (msg.data.userId) cfg.userId = msg.data.userId;
-          chrome.storage.local.set({ wsConfig: cfg });
-        });
+        try {
+          chrome.storage.local.get('wsConfig', function (data) {
+            if (chrome.runtime.lastError) return;
+            var cfg = data.wsConfig || {};
+            if (msg.data.clerkId) cfg.clerkId = msg.data.clerkId;
+            if (msg.data.userId) cfg.userId = msg.data.userId;
+            chrome.storage.local.set({ wsConfig: cfg });
+          });
+        } catch (e) { /* context invalidated */ }
         break;
 
       case 'CHECK_BB':
-        // BotBouncer check request — forward to background
-        chrome.runtime.sendMessage(
+
+        safeSendMessage(
           { type: 'CHECK_BOTBOUNCER', payload: { subreddit: msg.data.subreddit } },
           function (response) {
             if (chrome.runtime.lastError) {
@@ -60,14 +64,14 @@
             var result = response || { safe: false };
 
             // Log BB result
-            chrome.runtime.sendMessage({
+            safeSendMessage({
               type: 'BB_LOG_ENTRY',
               payload: {
                 subreddit: msg.data.subreddit,
                 status: result.safe ? 'safe' : 'unsafe',
                 action: result.safe ? 'confirmed_safe' : 'bb_detected',
               },
-            }).catch(function () { });
+            });
 
             // Send result back to MAIN world
             window.postMessage({
@@ -85,45 +89,48 @@
         break;
 
       case 'TASK_CLAIMED':
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           type: 'TASK_CLAIMED',
           payload: { subreddit: msg.data.subreddit },
-        }).catch(function () { });
-        chrome.runtime.sendMessage({
+        });
+        safeSendMessage({
           type: 'BB_LOG_ENTRY',
           payload: { subreddit: msg.data.subreddit, status: 'safe', action: 'claimed' },
-        }).catch(function () { });
+        });
         break;
 
       case 'TASK_CLAIM_FAILED':
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           type: 'TASK_CLAIM_FAILED',
           payload: { reason: msg.data.reason, subreddit: msg.data.subreddit },
-        }).catch(function () { });
+        });
         break;
 
       case 'TASK_SKIPPED':
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           type: 'TASK_SKIPPED_BOTBOUNCER',
           payload: { subreddit: msg.data.subreddit },
-        }).catch(function () { });
-        chrome.runtime.sendMessage({
+        });
+        safeSendMessage({
           type: 'BB_LOG_ENTRY',
           payload: { subreddit: msg.data.subreddit, status: 'unsafe', action: 'skipped' },
-        }).catch(function () { });
+        });
         break;
 
       case 'ACCEPT_SENT':
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           type: 'STAGE_ACCEPT',
           payload: { subreddit: msg.data.subreddit, buttonText: '(WebSocket direct)' },
-        }).catch(function () { });
+        });
         break;
     }
   });
 
   // ─── Send Config to MAIN World ───────────────────────────
   function sendConfig() {
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) return;
+    } catch (e) { return; }
     chrome.storage.local.get(['state', 'wsConfig'], function (data) {
       if (chrome.runtime.lastError) return;
       var state = data.state || {};
@@ -144,6 +151,7 @@
   }
 
   // ─── Listen for State Changes from Background ────────────
+  try {
   chrome.runtime.onMessage.addListener(function (message, _sender, sendResponse) {
     if (message.type === 'STATE_UPDATED') {
       // Forward state change to MAIN world
@@ -163,12 +171,13 @@
     }
     return false;
   });
+  } catch (e) { /* context invalidated */ }
 
   // ─── Initialize ──────────────────────────────────────────
-  // Wait a tiny bit for the MAIN world interceptor to be ready
+
   setTimeout(sendConfig, 100);
 
-  // Also send config when the MAIN world asks for it
+
   window.addEventListener('message', function (event) {
     if (event.source !== window) return;
     var msg = event.data;

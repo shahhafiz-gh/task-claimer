@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Task Auto Claimer",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "WebSocket-level task claiming via Convex protocol interception. Ultra-fast <5ms accept.",
   "permissions": [
     "storage",
@@ -29,13 +29,7 @@
     {
       "matches": ["https://earntask.io/*", "https://www.earntask.io/*"],
       "js": [
-        "content/bridge.js",
-        "content/core.js",
-        "content/helpers.js",
-        "content/detection.js",
-        "content/botbouncer.js",
-        "content/stages.js",
-        "content/observer.js"
+        "content/bridge.js"
       ],
       "run_at": "document_start"
     }

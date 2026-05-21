@@ -3,6 +3,7 @@
  */
 (function () {
   'use strict';
+  var S = TB.state;
 
   TB.isClickableButton = function (el) {
     if (!el || el.disabled) return false;
@@ -27,6 +28,8 @@
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
   };
+
+  TB.instantInject = TB.fillInput; // Alias for "Parallel Sprint" nomenclature
 
   TB.simulateEnter = function (element) {
     var opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
@@ -65,5 +68,166 @@
     try {
       chrome.runtime.sendMessage({ type: type, payload: payload }).catch(function () { });
     } catch (e) { /* Extension context may be invalidated */ }
+  };
+
+  // ─── Cloudflare Turnstile Detection ────────────────────
+  TB.detectTurnstile = function () {
+    var selectors = [
+      '.cf-turnstile',
+      '[data-sitekey]',
+      'iframe[src*="challenges.cloudflare.com"]',
+      'iframe[src*="turnstile"]',
+    ];
+    for (var i = 0; i < selectors.length; i++) {
+      try {
+        var el = document.querySelector(selectors[i]);
+        if (el) {
+          var siteKey = null;
+          var siteKeyEl = document.querySelector('[data-sitekey], [data-site-key], .cf-turnstile');
+          if (siteKeyEl) {
+            siteKey = siteKeyEl.getAttribute('data-sitekey') || siteKeyEl.getAttribute('data-site-key');
+          }
+          if (!siteKey) {
+            var iframes = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]');
+            for (var j = 0; j < iframes.length; j++) {
+              var src = iframes[j].src || '';
+              var match = src.match(/(0x4[A-Za-z0-9_-]{15,30})/);
+              if (match) {
+                siteKey = match[1];
+                break;
+              }
+            }
+          }
+          if (siteKey) {
+            TB.notify('SAVE_SITEKEY', { siteKey: siteKey });
+          }
+          return el;
+        }
+      } catch (e) { continue; }
+    }
+    return null;
+  };
+
+  TB.isTurnstileCompleted = function () {
+    // Method 1: Non-empty Turnstile response token in hidden input/textarea
+    var responseEls = document.querySelectorAll(
+      'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], ' +
+      'input[name*="turnstile"], textarea[name*="turnstile"]'
+    );
+    for (var i = 0; i < responseEls.length; i++) {
+      if (responseEls[i].value && responseEls[i].value.trim().length > 0) return true;
+    }
+    // Method 2: data-response attribute on container
+    var containers = document.querySelectorAll('.cf-turnstile, [data-sitekey]');
+    for (var j = 0; j < containers.length; j++) {
+      var resp = containers[j].getAttribute('data-response');
+      if (resp && resp.trim().length > 0) return true;
+    }
+    // Method 3: Visual "Success" indicator near the Turnstile widget
+    // The widget shows a green checkmark + "Success!" text when resolved
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    while (walker.nextNode()) {
+      var text = walker.currentNode.textContent.trim().toLowerCase();
+      if (text === 'success!' || text === 'success') {
+        var parent = walker.currentNode.parentElement;
+        if (parent && parent.closest && (
+          parent.closest('.cf-turnstile, [data-sitekey], [class*="turnstile"], [class*="captcha"], [class*="verification"]')
+        )) return true;
+      }
+    }
+    return false;
+  };
+
+  // Try to activate Turnstile managed challenge by clicking the iframe/widget
+  TB.tryClickTurnstile = function () {
+    // Click the Turnstile iframe — triggers managed challenge activation
+    var iframes = document.querySelectorAll(
+      'iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]'
+    );
+    for (var i = 0; i < iframes.length; i++) {
+      try {
+        var rect = iframes[i].getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          iframes[i].focus();
+          iframes[i].click();
+          console.log('[TaskBot] \ud83d\udd12 Clicked Turnstile iframe to activate challenge');
+          TB.notify('PUSH_LOG', { level: 'info', message: '🔓 Clicked Turnstile iframe to activate challenge' });
+          return true;
+        }
+      } catch (e) { continue; }
+    }
+    // Fallback: click the container div (some implementations use a div overlay)
+    var containers = document.querySelectorAll('.cf-turnstile, [data-sitekey]');
+    for (var j = 0; j < containers.length; j++) {
+      try {
+        var cRect = containers[j].getBoundingClientRect();
+        if (cRect.width > 0 && cRect.height > 0) {
+          containers[j].click();
+          console.log('[TaskBot] \ud83d\udd12 Clicked Turnstile container to activate challenge');
+          TB.notify('PUSH_LOG', { level: 'info', message: '🔓 Clicked Turnstile container to activate challenge' });
+          return true;
+        }
+      } catch (e) { continue; }
+    }
+    return false;
+  };
+
+  // ─── Capsolver Token Injector ────────────────────────────
+  TB.fireCapsolverAndInject = function () {
+    if (S.capsolverFired) return; 
+    S.capsolverFired = true;
+
+    var siteKeyEl = document.querySelector('.cf-turnstile, [data-sitekey]');
+    var siteKey = siteKeyEl ? siteKeyEl.getAttribute('data-sitekey') : null;
+
+    console.log("[TaskBot Content] Attempting Capsolver. Sitekey found:", siteKey); 
+
+    if (!siteKey) {
+        console.warn("[TaskBot] ⚠️ Turnstile detected but couldn't extract sitekey.");
+        TB.notify('PUSH_LOG', { level: 'warn', message: '⚠️ Turnstile detected but couldn\'t extract sitekey.' });
+        return; 
+    }
+
+    var websiteURL = window.location.href.split('?')[0]; // Clean URL
+
+    console.log("[TaskBot] 🚀 Firing Capsolver API...");
+    TB.notify('PUSH_LOG', { level: 'info', message: '🚀 Firing Capsolver API...' });
+    
+    chrome.runtime.sendMessage(
+      { type: 'SOLVE_TURNSTILE_CAPSOLVER', payload: { websiteURL: websiteURL, websiteKey: siteKey } },
+      function (response) {
+        if (chrome.runtime.lastError || !response || !response.success) {
+          console.error("[TaskBot] ❌ Capsolver failed:", response?.error || chrome.runtime.lastError);
+          TB.notify('PUSH_LOG', { level: 'error', message: '❌ Capsolver failed: ' + (response?.error || chrome.runtime.lastError?.message || 'unknown error') });
+          return;
+        }
+
+        var token = response.token;
+        console.log("[TaskBot] 💉 Injecting Capsolver token into DOM...");
+        TB.notify('PUSH_LOG', { level: 'info', message: '💉 Injecting Capsolver token into DOM...' });
+
+        // 1. Inject into the hidden response input
+        var responseInput = document.querySelector('input[name="cf-turnstile-response"]');
+        if (responseInput) {
+          var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(responseInput, token);
+          responseInput.dispatchEvent(new Event('input', { bubbles: true }));
+          responseInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        // 2. Inject into the container's data-response attribute (Cloudflare sometimes reads this)
+        if (siteKeyEl) {
+            siteKeyEl.setAttribute('data-response', token);
+        }
+
+        // 3. Force our extension state to completed!
+        S.turnstileCompleted = true;
+
+        // 4. Trigger the final decision gate immediately!
+        if (S.hasSolvedCaptcha && !S.hasSubmittedCaptcha) {
+          TB.finalDecision();
+        }
+      }
+    );
   };
 })();

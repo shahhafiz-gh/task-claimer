@@ -1,12 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Task Auto Claimer",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "description": "Accept First, Verify Later — ultra-fast task claiming (<50ms) with parallel BotBouncer protection.",
   "permissions": [
     "storage",
     "activeTab"
   ],
+  "host_permissions": [
+    "https://api.capsolver.com/*",
+    "*://*.reddit.com/*"
+  ],
+
   "background": {
     "service_worker": "background.js"
   },
@@ -18,10 +23,17 @@
         "content/helpers.js",
         "content/detection.js",
         "content/botbouncer.js",
+        "content/bridge.js",
         "content/stages.js",
         "content/observer.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
   "action": {

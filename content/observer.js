@@ -5,6 +5,14 @@
   'use strict';
   var S = TB.state;
 
+  // ── Synchronous cross-world claim lock check ────────────────────────
+  // Reads the DOM attribute set by MAIN world interceptor.js.
+  // This is synchronous (no postMessage lag) so there is zero race condition.
+  function isWSClaiming() {
+    return document.documentElement.getAttribute('data-ws-claiming') === 'true' ||
+           S.isWSClaiming;
+  }
+
   // Track URL for SPA navigation detection
   var lastUrl = window.location.href;
 
@@ -33,7 +41,8 @@
       }
 
       // Fast path: scan addedNodes directly for ALL accept buttons and click them all
-      if (!S.hasClickedAccept && !S.isVerifyingClaim && !S.hasSubmittedCaptcha) {
+      // Skip entirely if the WS bot is already handling this task
+      if (!isWSClaiming() && !S.hasClickedAccept && !S.isVerifyingClaim && !S.hasSubmittedCaptcha) {
         var foundButtons = [];
         for (var i = 0; i < mutations.length; i++) {
           var added = mutations[i].addedNodes;
@@ -101,6 +110,8 @@
     if (idleScanTimer) return;
     idleScanTimer = setInterval(function () {
       if (!S.isEnabled) return;
+      // Skip scan while WS bot is actively claiming
+      if (isWSClaiming()) return;
 
       // Stuck state detection — if we've been in an intermediate state
       // for over 15 seconds with no watchdog firing, force reset here too.

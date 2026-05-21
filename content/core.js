@@ -25,6 +25,10 @@ var TB = {
     storedCaptchaInput: null,
     storedSubmitBtn: null,
     currentSubreddit: null,
+    // Cloudflare Turnstile state
+    turnstileDetected: false,
+    turnstileCompleted: false,
+    turnstileTimer: null,
     taskQueue: [],
     taskQueueIndex: 0,
     isAdvancing: false,
@@ -33,6 +37,8 @@ var TB = {
     // Watchdog: auto-reset if stuck in any intermediate stage
     stageWatchdog: null,
     lastStageTransition: 0,
+    capsolverFired: false,
+    isWSClaiming: false,
   },
 
   settings: {

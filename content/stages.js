@@ -259,6 +259,8 @@
 
   // ─── Stage A: Accept Task (Bulk) ────────────────────────
   TB.tryAcceptTask = function () {
+    // WS bot is authenticated — it handles all claiming via WebSocket. Stand down.
+    if (document.documentElement.getAttribute('data-ws-active') === 'true') return;
     if (S.hasClickedAccept) return false;
     if (S.taskQueue.length === 0 || S.taskQueueIndex >= S.taskQueue.length) {
       TB.rebuildTaskQueue();
@@ -374,100 +376,200 @@
     S.hasSolvedCaptcha = true;
     TB.handled.add(captchaEl);
     TB.handled.add(captchaInput);
-    TB.fillInput(captchaInput, answer);
+    TB.instantInject(captchaInput, answer);
+    console.log('[TaskBot] 🔢 Solved Math: ' + captchaText + ' = ' + answer);
+    TB.notify('PUSH_LOG', { level: 'info', message: '🔢 Solved Math: ' + captchaText + ' = ' + answer });
     S.pendingCaptchaText = captchaText;
     S.pendingCaptchaAnswer = answer;
     S.storedCaptchaInput = captchaInput;
 
-    // Find submit button
+    // Find submit button (store for later)
     var submitBtn = null;
-    if (TB.settings.submitSelector) {
-      try { submitBtn = document.querySelector(TB.settings.submitSelector); } catch (e) { /* */ }
+    if (TB.settings.submitSelector && TB.settings.submitSelector.trim()) {
+      try {
+        submitBtn = document.querySelector(TB.settings.submitSelector);
+      } catch (e) {
+        console.warn('[TaskBot] Invalid submitSelector:', e.message);
+      }
     }
     if (!submitBtn) {
-      // Priority: look for "Verify & accept" button first (current captcha UI)
-      var allBtns = TB.getAllButtons(document.body);
-      for (var v = 0; v < allBtns.length; v++) {
-        if (!TB.isClickableButton(allBtns[v]) || TB.handled.has(allBtns[v])) continue;
-        var vText = TB.getText(allBtns[v]);
-        if ((vText.includes('verify') && vText.includes('accept')) ||
-            vText === 'verify & accept' || vText === 'verify and accept') {
-          submitBtn = allBtns[v]; break;
-        }
-      }
-      // Fallback: keyword scan
-      if (!submitBtn) {
-        var kws = ['verify', 'submit', 'send', 'confirm', 'done', 'ok', 'accept'];
-        for (var b = 0; b < allBtns.length; b++) {
-          if (!TB.isClickableButton(allBtns[b]) || TB.handled.has(allBtns[b])) continue;
-          var btnText = TB.getText(allBtns[b]);
-          // Skip cancel/no/close buttons
-          if (btnText === 'cancel' || btnText === 'no' || btnText === 'close') continue;
-          if (kws.some(function (kw) { return btnText.includes(kw); })) { submitBtn = allBtns[b]; break; }
+      // STRICT SEARCH: We must find the FINAL submit button, NOT the "Yes, accept" button!
+      var btns = TB.getAllButtons(document.body);
+      for (var i = 0; i < btns.length; i++) {
+        var btn = btns[i];
+        if (!TB.isClickableButton(btn)) continue;
+        if (TB.handled.has(btn)) continue;
+        var text = TB.getText(btn);
+        
+        // CRITICAL: Exclude Stage 2 confirmation buttons
+        if (text.includes('yes') || text === 'accept' || text === 'claim') continue;
+        
+        // Check for Stage 4 final submission keywords
+        // Put "verify & accept" first for fastest match
+        var submitKeywords = ['verify & accept', 'verify and accept', 'submit', 'send', 'done', 'verify', 'ok', 'confirm'];
+        if (submitKeywords.some(function (kw) { return text.includes(kw); })) {
+          submitBtn = btn;
+          console.log("[TaskBot] 🎯 Found FINAL submit button: \"" + text + "\"");
+          break;
         }
       }
     }
     S.storedSubmitBtn = submitBtn;
-
-    // Check for Cloudflare Turnstile widget
-    var turnstileEl = TB.detectTurnstile();
-    if (turnstileEl) {
-      S.turnstileDetected = true;
-      console.log('[TaskBot] 🔒 Cloudflare Turnstile detected — waiting for completion');
-      TB.notify('PUSH_LOG', {
-        level: 'info',
-        message: '🔒 Cloudflare Turnstile detected — waiting for auto-resolve',
-      });
-      if (TB.isTurnstileCompleted()) {
-        S.turnstileCompleted = true;
-        console.log('[TaskBot] ✅ Turnstile already completed');
-      } else {
-        TB.pollTurnstile();
-        return true; // Wait for Turnstile before finalDecision
-      }
+    if (submitBtn) {
+      TB.notify('PUSH_LOG', { level: 'info', message: '🎯 Found FINAL submit button: "' + TB.getText(submitBtn) + '"' });
+    } else {
+      console.warn('[TaskBot] ⚠️ Could not find final submit button!');
+      TB.notify('PUSH_LOG', { level: 'warn', message: '⚠️ Could not find final submit button!' });
     }
+    
+    // ── THE PARALLEL SPRINT ──
+    // This website ALWAYS uses Turnstile. Force Capsolver to fire immediately!
+    S.turnstileDetected = true;
+    S.turnstileCompleted = false;
 
-    if (S.bbCheckCompleted) TB.finalDecision();
+    // 1. Start watching the DOM natively (in case auto-verify beats Capsolver)
+    TB.monitorTurnstile();
+
+    // 2. FIRE CAPSOLVER! (Runs in parallel with native Turnstile)
+    TB.fireCapsolverAndInject();
+
+    // ── Now decide: submit or wait ──
+    if (S.bbCheckCompleted && S.turnstileCompleted) {
+      TB.finalDecision();
+    }
     return true;
   };
 
-  // ─── Turnstile Polling ─────────────────────────────────
-  TB.pollTurnstile = function () {
+  // ─── Turnstile Monitoring (BLITZ SYSTEM) ───────────────
+  TB.monitorTurnstile = function () {
     if (S.turnstileTimer) clearInterval(S.turnstileTimer);
-    // Extend watchdog to allow Turnstile time to resolve
     TB.startWatchdog('turnstile-wait', 35000);
+    console.log('[TaskBot] ⚡ Blitz System initialized for Turnstile');
+    TB.notify('PUSH_LOG', { level: 'info', message: '⚡ Blitz System initialized for Turnstile' });
+
+    var responseInput = document.querySelector('input[name="cf-turnstile-response"]');
     var pollCount = 0;
     var hasClicked = false;
-    var MAX_POLLS = 150; // 30 seconds at 200ms intervals
+    var MAX_POLLS = 300; // 30 seconds at 100ms
+
+    // Step 3: Success/Failure Monitoring (The Toast Observer)
+    function startToastObserver() {
+      var successKeywords = ['success', 'claimed', 'completed', 'accepted'];
+      var failureKeywords = ['error', 'already claimed', 'failed', 'expired'];
+
+      var observer = new MutationObserver(function(mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var mutation = mutations[i];
+          for (var j = 0; j < mutation.addedNodes.length; j++) {
+            var node = mutation.addedNodes[j];
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              var text = (node.textContent || '').toLowerCase().trim();
+              if (!text || text.length > 300) continue;
+
+              for (var s = 0; s < successKeywords.length; s++) {
+                if (text.includes(successKeywords[s])) {
+                  console.log('[TaskBot] ✅ Blitz Observer: Success detected ("' + successKeywords[s] + '")');
+                  TB.notify('PUSH_LOG', { level: 'info', message: '✅ Blitz Success: ' + text.substring(0, 50) });
+                  TB.confirmClaimSuccess();
+                  observer.disconnect();
+                  return;
+                }
+              }
+              for (var f = 0; f < failureKeywords.length; f++) {
+                if (text.includes(failureKeywords[f])) {
+                  console.warn('[TaskBot] ❌ Blitz Observer: Failure detected ("' + failureKeywords[f] + '")');
+                  TB.notify('PUSH_LOG', { level: 'error', message: '❌ Blitz Failure: ' + text.substring(0, 50) });
+                  TB.abortClaim('Blitz Failure: ' + text.substring(0, 30));
+                  observer.disconnect();
+                  return;
+                }
+              }
+            }
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      return observer;
+    }
 
     S.turnstileTimer = setInterval(function () {
       pollCount++;
 
-      // After 800ms without auto-resolve, try clicking the widget
-      // This handles managed challenges that need a click to activate
-      if (!hasClicked && pollCount === 4) {
+      // Managed challenge click logic (fallback for non-auto solving Turnstiles)
+      if (!hasClicked && pollCount === 8) { // 800ms
         hasClicked = true;
         TB.tryClickTurnstile();
       }
-      // Retry click at 3s if still not resolved (widget may have loaded late)
-      if (hasClicked && pollCount === 15 && !TB.isTurnstileCompleted()) {
+      if (hasClicked && pollCount === 30 && (!responseInput || responseInput.value.length < 20)) { // 3s
         TB.tryClickTurnstile();
       }
 
-      if (TB.isTurnstileCompleted()) {
+      if (!responseInput) {
+        responseInput = document.querySelector('input[name="cf-turnstile-response"]');
+      }
+
+      // Step 1: Detect Turnstile Completion (The "Green" Signal)
+      if (responseInput && responseInput.value && responseInput.value.length > 20) {
         clearInterval(S.turnstileTimer);
         S.turnstileTimer = null;
         S.turnstileCompleted = true;
-        console.log('[TaskBot] ✅ Turnstile completed after ' + (pollCount * 200) + 'ms');
-        TB.notify('PUSH_LOG', {
-          level: 'info',
-          message: '✅ Cloudflare Turnstile completed (' + (pollCount * 200) + 'ms)',
-        });
-        if (S.bbCheckCompleted) TB.finalDecision();
+        console.log('[TaskBot] ⚡ Blitz Signal: Turnstile token ready!:', responseInput);
+        
+        // BB Check Guard
+        if (TB.settings.botBouncerCheckEnabled) {
+          if (S.abortSubmission || (S.bbCheckCompleted && !S.bbCheckResult)) {
+            console.warn('[TaskBot] 🛡️ Blitz: BB Check failed. Aborting Blitz submission.');
+            TB.silentAbort(S.pendingSubreddit || 'unknown');
+            return;
+          }
+          if (!S.bbCheckCompleted) {
+            console.warn('[TaskBot] ⏱️ Blitz: BB Check not yet completed! Deferring to finalDecision.');
+            TB.finalDecision();
+            return;
+          }
+        }
+
+        // Start observer immediately before clicking
+        startToastObserver();
+
+        // Step 2: The "Pre-emptive" Button Search
+        var submitBtn = S.storedSubmitBtn;
+        if (!submitBtn || !TB.isClickableButton(submitBtn)) {
+          var allBtns = TB.getAllButtons(document.body);
+          for (var i = 0; i < allBtns.length; i++) {
+            if (TB.isClickableButton(allBtns[i])) {
+              var text = TB.getText(allBtns[i]);
+              if (text.includes('verify') || text.includes('submit') || text.includes('accept') || text.includes('claim')) {
+                submitBtn = allBtns[i];
+                break;
+              }
+            }
+          }
+        }
+
+        S.hasSubmittedCaptcha = true;
+        S.isVerifyingClaim = true;
+
+        if (submitBtn) {
+          console.log('[TaskBot] ⚡ Blitz: Clicking pre-located submit button NOW!');
+          TB.handled.add(submitBtn);
+          submitBtn.click();
+        } else {
+          console.warn('[TaskBot] ⚠️ Blitz: Submit button missing, simulating enter on input.');
+          TB.simulateEnter(responseInput);
+        }
+        
+        // Fallback verify timer in case toast observer doesn't catch it
+        S.verifyTimer = setTimeout(function () {
+          S.verifyTimer = null;
+          if (!S.isVerifyingClaim) return;
+          console.log('[TaskBot] ⏱️ Blitz Verify timeout — no success signal. Aborting claim.');
+          TB.silentAbort(S.pendingSubreddit || 'unknown');
+        }, 4000);
+
       } else if (pollCount >= MAX_POLLS) {
         clearInterval(S.turnstileTimer);
         S.turnstileTimer = null;
-        console.warn('[TaskBot] ⏱️ Turnstile timeout after 30s');
         TB.notify('PUSH_LOG', {
           level: 'warn',
           message: '⏱️ Cloudflare Turnstile timed out — aborting claim',
@@ -533,6 +635,9 @@
 
   // ─── Stage Router ──────────────────────────────────────
   TB.runCurrentStage = function () {
+    // Double-guard: check both the state flag AND the synchronous DOM attribute
+    // that the MAIN world interceptor sets immediately (no postMessage lag).
+    if (S.isWSClaiming || document.documentElement.getAttribute('data-ws-claiming') === 'true') return;
     if (!S.isEnabled || S.isVerifyingClaim || S.hasSubmittedCaptcha) return;
     if (!S.hasClickedAccept) { TB.tryAcceptTask(); return; }
     if (!S.hasClickedConfirm) { TB.tryConfirmation(); return; }
@@ -540,6 +645,7 @@
   };
 
   TB.resetState = function () {
+    S.isWSClaiming = false;
     S.hasClickedAccept = false;
     S.hasClickedConfirm = false;
     S.hasSolvedCaptcha = false;

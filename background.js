@@ -185,17 +185,20 @@ async function processCheck(key, subreddit, timeoutMs, cacheTtlMs) {
   try {
     const result = await fetchBotBouncerCheck(subreddit, timeoutMs);
 
-    // ── Always cache the result — safe OR unsafe ──
-    writeCacheEntry(key, result.safe);
+    // ── Only cache successful API responses ──
+    // If Reddit is down or returns an error, we still fail-safe and block the
+    // current task, but we DO NOT cache the error. This way, if the error clears
+    // up later, we will try the API again.
+    if (!result.error) {
+      writeCacheEntry(key, result.safe);
+    }
 
     // Resolve all waiting callbacks
     const callbacks = pendingChecks.get(key) || [];
     for (const cb of callbacks) cb(result);
     pendingChecks.delete(key);
   } catch (err) {
-    // On hard error, cache as unsafe so we don't hammer the API
-    writeCacheEntry(key, false);
-
+    // ── DO NOT cache on error ──
     const result = { safe: false, cached: false, error: err.message };
     const callbacks = pendingChecks.get(key) || [];
     for (const cb of callbacks) cb(result);
@@ -223,18 +226,40 @@ async function fetchBotBouncerCheck(subreddit, timeoutMs = 5000) {
 
     const response = await fetch(url, {
       signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; TaskAutoClaimerExtension/1.0)',
-      },
+      credentials: 'include'
     });
 
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      const errMsg = `HTTP ${response.status} for r/${subreddit} — treating as UNSAFE`;
-      console.warn(`[BotBouncer] ${errMsg}`);
-      addLog('error', `🚫 ${errMsg}`);
-      return { safe: false, cached: false, error: `HTTP ${response.status}` };
+      const errMsg = `HTTP ${response.status} for r/${subreddit} on JSON API`;
+      console.warn(`[BotBouncer] ${errMsg} — attempting HTML fallback...`);
+      
+      try {
+        // ── HTML Fallback ──
+        // Reddit's .json API is heavily rate-limited, but their HTML pages are less strict.
+        const htmlUrl = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/about/moderators/`;
+        const htmlRes = await fetch(htmlUrl, { signal: controller.signal, credentials: 'include' });
+        
+        if (htmlRes.ok) {
+          const html = await htmlRes.text();
+          const hasBB = html.toLowerCase().includes('botbouncer') || html.toLowerCase().includes('bot-bouncer');
+          const safe = !hasBB;
+          const resultMsg = `r/${subreddit}: ${safe ? 'SAFE ✓' : 'UNSAFE ✗'} (HTML fallback)`;
+          console.log(`[BotBouncer] ${resultMsg}`);
+          addLog(safe ? 'success' : 'warn', `🛡️ ${resultMsg}`);
+          return { safe: safe, cached: false };
+        }
+      } catch (fallbackErr) {
+        console.warn(`[BotBouncer] HTML fallback failed: ${fallbackErr.message}`);
+      }
+
+      // ── Fail Open Strategy ──
+      // If Reddit completely blocks us, we assume it's SAFE so the user doesn't miss tasks.
+      const failOpenMsg = `r/${subreddit} — Reddit API blocked us. FAILING OPEN (Safe)`;
+      console.warn(`[BotBouncer] ⚠️ ${failOpenMsg}`);
+      addLog('warn', `⚠️ ${failOpenMsg}`);
+      return { safe: true, cached: false, error: `HTTP ${response.status} - failed open` };
     }
 
     const data = await response.json();
@@ -259,11 +284,85 @@ async function fetchBotBouncerCheck(subreddit, timeoutMs = 5000) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════
+// CAPSOLVER INTEGRATION (WITH DEBUG LOGS)
+// ═══════════════════════════════════════════════════════════
+const CAPSOLVER_API_KEY = "CAP-EA13F2A9B1DD997C77026ACC40C3FBFE48FDE78E6569D7EC9D9C1B6868D63754"; 
+
+async function solveTurnstileCapsolver(websiteURL, websiteKey) {
+  console.log(`[Capsolver BG] 🧠 Step 1: Requesting token for ${websiteURL}`);
+  addLog('info', `🧠 Sending Turnstile to Capsolver...`);
+
+  try {
+    // 1. Create Task (Using the exact API docs you provided)
+    console.log("[Capsolver BG] Sending createTask...");
+    const createRes = await fetch("https://api.capsolver.com/createTask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clientKey: CAPSOLVER_API_KEY,
+        task: {
+          type: "AntiTurnstileTaskProxyLess",
+          websiteURL: websiteURL,
+          websiteKey: websiteKey
+        }
+      })
+    });
+    const createData = await createRes.json();
+    console.log("[Capsolver BG] createTask Response:", createData);
+
+    if (createData.errorId !== 0) {
+      console.error("[Capsolver BG] Create Task Error:", createData.errorDescription);
+      return { success: false, error: createData.errorDescription };
+    }
+
+    const taskId = createData.taskId;
+    console.log(`[Capsolver BG] Step 2: Task created! ID: ${taskId}. Polling for result...`);
+
+    // 2. Poll for Result (Using the exact API docs you provided)
+    for (let i = 0; i < 15; i++) { 
+      await new Promise(r => setTimeout(r, 1000));
+      
+      const resultRes = await fetch("https://api.capsolver.com/getTaskResult", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientKey: CAPSOLVER_API_KEY,
+          taskId: taskId
+        })
+      });
+      const resultData = await resultRes.json();
+      console.log(`[Capsolver BG] Poll ${i+1} status:`, resultData.status);
+
+      if (resultData.errorId !== 0) {
+        console.error("[Capsolver BG] Get Result Error:", resultData.errorDescription);
+        return { success: false, error: resultData.errorDescription };
+      }
+
+      if (resultData.status === "ready") {
+        console.log("[Capsolver BG] ✅ Token is READY!");
+        addLog('success', `✅ Capsolver token received!`);
+        return { success: true, token: resultData.solution.token };
+      }
+    }
+
+    return { success: false, error: "Timeout waiting for Capsolver" };
+
+  } catch (err) {
+    console.error("[Capsolver BG] Network/Fetch Error:", err);
+    return { success: false, error: err.message };
+  }
+}
+
 // ─── Startup ──────────────────────────────────────────────────────
 // No need to pre-load the cache on startup — readCacheEntry() reads
 // chrome.storage.local on demand, so a cold SW restart won't cause
 // unnecessary API calls.
 console.log('[BotBouncer] 🚀 Background service worker started. Cache is read on-demand from storage.');
+
+// Known earntask.io Turnstile sitekey — pre-seeded so the ghost solver
+// starts immediately from the first page load on any install/reload.
+const KNOWN_SITE_KEY = '0x4AAAAAACxj8_tgxWTBH2nu';
 
 // Initialize state on install
 chrome.runtime.onInstalled.addListener(() => {
@@ -280,6 +379,16 @@ chrome.runtime.onInstalled.addListener(() => {
       chrome.storage.local.set({ bbLogs: [] });
     }
   });
+  // Pre-seed the known sitekey into wsConfig so sendConfig() always delivers it
+  chrome.storage.local.get('wsConfig', ({ wsConfig }) => {
+    const cfg = wsConfig || {};
+    if (!cfg.siteKey) {
+      cfg.siteKey = KNOWN_SITE_KEY;
+      chrome.storage.local.set({ wsConfig: cfg }, () => {
+        console.log('[BG] 💾 Pre-seeded Turnstile siteKey into storage: ' + KNOWN_SITE_KEY);
+      });
+    }
+  });
 });
 
 // Central message handler
@@ -289,12 +398,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (type) {
     case 'GET_STATE':
       chrome.storage.local.get('state', ({ state }) => {
+        state = state || DEFAULT_STATE;
         sendResponse({ state: state || DEFAULT_STATE });
       });
       return true;
 
     case 'SET_STATE':
       chrome.storage.local.get('state', ({ state }) => {
+        state = state || DEFAULT_STATE;
         const updated = { ...state, ...payload };
 
         // Update maxParallel if changed
@@ -395,6 +506,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'STAGE_ACCEPT':
       addLog('success', `⚡ Accepted task${payload?.subreddit ? ` from r/${payload.subreddit}` : ''} (instant)`);
       chrome.storage.local.get('state', ({ state }) => {
+        state = state || DEFAULT_STATE;
         const updated = {
           ...state,
           lastStage: 'accept',
@@ -409,6 +521,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'STAGE_CONFIRM':
       addLog('info', '🔘 Clicked confirmation button');
       chrome.storage.local.get('state', ({ state }) => {
+        state = state || DEFAULT_STATE;
         const updated = {
           ...state,
           lastStage: 'confirm',
@@ -423,6 +536,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'TASK_CLAIMED':
       addLog('success', `🎉 Task claimed! Captcha: ${payload.captchaExpression || 'N/A'} = ${payload.captchaAnswer || '?'}${payload.subreddit ? ` | r/${payload.subreddit}` : ''}`);
       chrome.storage.local.get('state', ({ state }) => {
+        state = state || DEFAULT_STATE;
         const updated = {
           ...state,
           totalClaimed: (state.totalClaimed || 0) + 1,
@@ -441,6 +555,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'TASK_CLAIM_FAILED':
       addLog('error', `❌ Claim FAILED${payload?.subreddit ? ` for r/${payload.subreddit}` : ''} — ${payload?.reason || 'unknown error'}`);
       chrome.storage.local.get('state', ({ state }) => {
+        state = state || DEFAULT_STATE;
         const updated = {
           ...state,
           lastStage: 'claim_failed',
@@ -455,6 +570,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'TASK_SKIPPED_BOTBOUNCER':
       addLog('warn', `⛔ Skipped task from r/${payload.subreddit || 'unknown'} — BotBouncer detected`);
       chrome.storage.local.get('state', ({ state }) => {
+        state = state || DEFAULT_STATE;
         const updated = {
           ...state,
           totalSkippedBotBouncer: (state.totalSkippedBotBouncer || 0) + 1,
@@ -470,6 +586,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'TOGGLE_ENABLED':
       chrome.storage.local.get('state', ({ state }) => {
+        state = state || DEFAULT_STATE;
         const updated = { ...state, enabled: !state.enabled };
         addLog('info', updated.enabled ? '▶️ Extension ENABLED' : '⏸️ Extension PAUSED');
         chrome.storage.local.set({ state: updated }, () => {
@@ -504,6 +621,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
       });
       return true;
+
+    case 'SOLVE_TURNSTILE_CAPSOLVER': {
+      console.log("[BG] ✅ Received SOLVE_TURNSTILE_CAPSOLVER message from content script!");
+      const { websiteURL, websiteKey } = payload;
+      solveTurnstileCapsolver(websiteURL, websiteKey)
+        .then(result => {
+          console.log("[BG] Sending result back to content script:", result.success);
+          sendResponse(result);
+        })
+        .catch(err => sendResponse({ success: false, error: err.message }));
+      return true; // CRITICAL: Required for async sendResponse
+    }
+
+    case 'SAVE_SITEKEY': {
+      const { siteKey } = payload;
+      chrome.storage.local.get(['state', 'wsConfig'], (data) => {
+        const state = data.state || DEFAULT_STATE;
+        const cfg = data.wsConfig || {};
+        if (cfg.siteKey !== siteKey) {
+          cfg.siteKey = siteKey;
+          chrome.storage.local.set({ wsConfig: cfg }, () => {
+            console.log(`[BG] 💾 Saved Turnstile SiteKey: ${siteKey}`);
+            addLog('info', `💾 Auto-captured Turnstile SiteKey: ${siteKey}`);
+            // Broadcast state updated to content scripts to launch ghost solver
+            chrome.tabs.query({}, (tabs) => {
+              for (const tab of tabs) {
+                chrome.tabs.sendMessage(tab.id, {
+                  type: 'STATE_UPDATED',
+                  payload: {
+                    ...state,
+                    siteKey: siteKey
+                  }
+                }).catch(() => {});
+              }
+            });
+          });
+        }
+      });
+      sendResponse({ ok: true });
+      return true;
+    }
 
     default:
       sendResponse({ error: 'Unknown message type' });

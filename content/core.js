@@ -37,6 +37,8 @@ var TB = {
     // Watchdog: auto-reset if stuck in any intermediate stage
     stageWatchdog: null,
     lastStageTransition: 0,
+    capsolverFired: false,
+    isWSClaiming: false,
   },
 
   settings: {

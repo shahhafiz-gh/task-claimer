@@ -1,11 +1,23 @@
 {
   "manifest_version": 3,
   "name": "Task Auto Claimer",
+<<<<<<< HEAD
   "version": "3.0.0",
   "description": "Accept First, Verify Later — ultra-fast task claiming (<50ms) with parallel BotBouncer protection.",
+=======
+  "version": "3.0.1",
+  "description": "WebSocket-level task claiming via Convex protocol interception. Ultra-fast <5ms accept.",
+>>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://earntask.io/*",
+    "https://www.earntask.io/*",
+    "https://www.reddit.com/*",
+    "https://*.convex.cloud/*"
   ],
   "host_permissions": [
     "https://api.capsolver.com/*",
@@ -16,8 +28,9 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": ["https://earntask.io/*", "https://www.earntask.io/*"],
       "js": [
+<<<<<<< HEAD
         "content/core.js",
         "content/helpers.js",
         "content/detection.js",
@@ -33,6 +46,19 @@
       "js": ["content/interceptor.js"],
       "run_at": "document_start",
       "world": "MAIN"
+=======
+        "content/interceptor.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://earntask.io/*", "https://www.earntask.io/*"],
+      "js": [
+        "content/bridge.js"
+      ],
+      "run_at": "document_start"
+>>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
     }
   ],
   "action": {

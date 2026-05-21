@@ -27,6 +27,7 @@ const DEFAULT_STATE = {
   // UI settings
   soundEnabled: true,
   safeModeEnabled: false,
+  desktopNotificationsEnabled: true,
   // BotBouncer settings
   botBouncerCheckEnabled: true,
   // BB check settings — optimized for speed
@@ -71,6 +72,61 @@ function addBBLog(entry) {
     chrome.storage.local.set({ bbLogs: arr });
   });
 }
+
+// ─── Notification System ──────────────────────────────────────────
+const NOTIFICATION_URL_KEY = 'notification_urls';
+
+/**
+ * Show a desktop notification and optionally open/focus a tab.
+ * @param {string} title
+ * @param {string} message
+ * @param {string} notificationId
+ * @param {string} [targetUrl]
+ */
+function showNotification(title, message, notificationId, targetUrl) {
+  const id = notificationId || `task-${Date.now()}`;
+  
+  chrome.notifications.create(id, {
+    type: 'basic',
+    iconUrl: 'assets/icon128.png',
+    title: title || 'Task Auto Claimer',
+    message: message || '',
+    priority: 2
+  });
+
+  if (targetUrl) {
+    // Store URL for click handler
+    chrome.storage.local.get(NOTIFICATION_URL_KEY, (data) => {
+      const urls = data[NOTIFICATION_URL_KEY] || {};
+      urls[id] = targetUrl;
+      chrome.storage.local.set({ [NOTIFICATION_URL_KEY]: urls });
+    });
+  }
+}
+
+// Interaction: Handle notification click
+chrome.notifications.onClicked.addListener((id) => {
+  chrome.storage.local.get(NOTIFICATION_URL_KEY, (data) => {
+    const urls = data[NOTIFICATION_URL_KEY] || {};
+    const url = urls[id];
+    if (url) {
+      // Focus existing tab with that URL or open new one
+      chrome.tabs.query({}, (tabs) => {
+        const existingTab = tabs.find(t => t.url && t.url.includes(url));
+        if (existingTab) {
+          chrome.tabs.update(existingTab.id, { active: true });
+          chrome.windows.update(existingTab.windowId, { focused: true });
+        } else {
+          chrome.tabs.create({ url });
+        }
+        
+        // Clean up stored URL
+        delete urls[id];
+        chrome.storage.local.set({ [NOTIFICATION_URL_KEY]: urls });
+      });
+    }
+  });
+});
 
 // ─── BotBouncer In-Memory Cache (hot-path within a SW session) ────
 // This is a fast short-circuit. Chrome can kill and restart the service
@@ -533,17 +589,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       return true;
 
-    case 'TASK_CLAIMED':
-      addLog('success', `🎉 Task claimed! Captcha: ${payload.captchaExpression || 'N/A'} = ${payload.captchaAnswer || '?'}${payload.subreddit ? ` | r/${payload.subreddit}` : ''}`);
+    case 'TASK_CLAIMED': {
+      const claimMsg = `🎉 Task claimed!${payload.subreddit ? ` | r/${payload.subreddit}` : ''}`;
+      addLog('success', claimMsg);
+      
       chrome.storage.local.get('state', ({ state }) => {
+<<<<<<< HEAD
         state = state || DEFAULT_STATE;
+=======
+        // Trigger notification for success (opens dashboard)
+        if (state?.desktopNotificationsEnabled !== false) {
+          showNotification('Task Claimed!', claimMsg, `claim-${Date.now()}`, 'https://www.reddit.com/notifications');
+        }
+
+>>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
         const updated = {
           ...state,
           totalClaimed: (state.totalClaimed || 0) + 1,
           lastTaskClaimed: 'Task Claimed',
-          lastCaptchaSolved: payload.captchaExpression || null,
           lastClaimTimestamp: Date.now(),
-          lastStage: 'captcha',
+          lastStage: 'confirmed',
           lastStageTimestamp: Date.now(),
         };
         chrome.storage.local.set({ state: updated }, () => {
@@ -551,11 +616,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       });
       return true;
+    }
 
-    case 'TASK_CLAIM_FAILED':
-      addLog('error', `❌ Claim FAILED${payload?.subreddit ? ` for r/${payload.subreddit}` : ''} — ${payload?.reason || 'unknown error'}`);
+    case 'TASK_CLAIM_FAILED': {
+      const failMsg = `❌ Claim FAILED${payload?.subreddit ? ` for r/${payload.subreddit}` : ''} — ${payload?.reason || 'unknown error'}`;
+      addLog('error', failMsg);
+
       chrome.storage.local.get('state', ({ state }) => {
+<<<<<<< HEAD
         state = state || DEFAULT_STATE;
+=======
+        // Trigger notification for failure
+        if (state?.desktopNotificationsEnabled !== false) {
+          showNotification('Claim Failed', failMsg, `fail-${Date.now()}`);
+        }
+
+>>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
         const updated = {
           ...state,
           lastStage: 'claim_failed',
@@ -566,6 +642,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       });
       return true;
+    }
 
     case 'TASK_SKIPPED_BOTBOUNCER':
       addLog('warn', `⛔ Skipped task from r/${payload.subreddit || 'unknown'} — BotBouncer detected`);
@@ -622,6 +699,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       return true;
 
+<<<<<<< HEAD
     case 'SOLVE_TURNSTILE_CAPSOLVER': {
       console.log("[BG] ✅ Received SOLVE_TURNSTILE_CAPSOLVER message from content script!");
       const { websiteURL, websiteKey } = payload;
@@ -661,6 +739,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       sendResponse({ ok: true });
       return true;
+=======
+    case 'SHOW_NOTIFICATION': {
+      const { title, message, notificationId, url } = payload;
+      showNotification(title, message, notificationId, url);
+      sendResponse({ ok: true });
+      return false;
+>>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
     }
 
     default:

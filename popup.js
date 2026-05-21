@@ -32,6 +32,7 @@
         delaySlider: $('delaySlider'),
         delayValue: $('delayValue'),
         soundToggle: $('soundToggle'),
+        desktopNotificationToggle: $('desktopNotificationToggle'),
         safeModeToggle: $('safeModeToggle'),
         botBouncerToggle: $('botBouncerToggle'),
         // BB Settings (NEW)
@@ -91,6 +92,9 @@
         elements.delaySlider.value = state.delayMs || 0;
         elements.delayValue.textContent = `${state.delayMs || 0}ms`;
         elements.soundToggle.checked = state.soundEnabled ?? true;
+        if (elements.desktopNotificationToggle) {
+            elements.desktopNotificationToggle.checked = state.desktopNotificationsEnabled ?? true;
+        }
         elements.safeModeToggle.checked = state.safeModeEnabled ?? false;
         elements.botBouncerToggle.checked = state.botBouncerCheckEnabled ?? true;
 
@@ -171,6 +175,13 @@
     elements.soundToggle.addEventListener('change', () => {
         updateState({ soundEnabled: elements.soundToggle.checked });
     });
+
+    // Desktop Notifications toggle
+    if (elements.desktopNotificationToggle) {
+        elements.desktopNotificationToggle.addEventListener('change', () => {
+            updateState({ desktopNotificationsEnabled: elements.desktopNotificationToggle.checked });
+        });
+    }
 
     // Safe mode toggle
     elements.safeModeToggle.addEventListener('change', () => {

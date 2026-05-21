@@ -13,23 +13,17 @@
 'use strict';
 
 (function () {
-<<<<<<< HEAD
   // ─── Hardcoded fallback siteKey (earntask.io Turnstile) ──
   // Captured from live session. Will be overridden by storage if a newer
   // key is saved, but guarantees ghost solving starts from page load.
   var HARDCODED_SITE_KEY = '0x4AAAAAACxj8_tgxWTBH2nu';
 
-=======
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
   // ─── Configuration (set via postMessage from bridge) ─────
   var config = {
     enabled: false,
     clerkId: '',
     userId: '',
-<<<<<<< HEAD
     siteKey: HARDCODED_SITE_KEY, // Pre-seeded — ghost solver starts immediately!
-=======
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
     initialized: false,
   };
 
@@ -37,7 +31,6 @@
   var convexWS = null;
   var origSendFn = null;
   var authToken = null;
-<<<<<<< HEAD
   var requestIdCounter = 20000;
 
   var acceptedTaskIds = {};
@@ -50,11 +43,6 @@
   var tokenTimestamp = 0;
   var ghostWidgetId = null;
   var ghostDiv = null;
-=======
-  var requestIdCounter = 10000;
-
-  var acceptedTaskIds = {};
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
 
   // ─── Logging (routes to bridge) ──────────────────────────
   function log(level, message) {
@@ -87,7 +75,6 @@
     switch (msg.type) {
       case 'CONFIG':
         config.enabled = msg.data.enabled || false;
-<<<<<<< HEAD
         // Prefer storage value, but never overwrite with empty string
         config.clerkId = msg.data.clerkId || config.clerkId;
         config.userId  = msg.data.userId  || config.userId;
@@ -124,18 +111,10 @@
           onTasksReceived(preConfigTaskQueue);
           preConfigTaskQueue = [];
         }
-=======
-        config.clerkId = msg.data.clerkId || config.clerkId;
-        config.userId = msg.data.userId || config.userId;
-        config.initialized = true;
-        log('info', 'Config received — enabled: ' + config.enabled +
-          ' | clerkId: ' + (config.clerkId ? 'set' : 'pending'));
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
         break;
     }
   });
 
-<<<<<<< HEAD
   // ─── Eager Ghost Start (hardcoded key — no waiting for bridge) ───────
   // Since we already know the siteKey at script compile-time, we can spin
   // up the ghost solver immediately on DOMContentLoaded WITHOUT waiting for
@@ -418,8 +397,6 @@
   }
   setInterval(checkDomForSiteKey, 1000);
 
-=======
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
   // ─── WebSocket Monkey-Patch ──────────────────────────────
   var OrigWebSocket = window.WebSocket;
 
@@ -429,7 +406,6 @@
       ? new OrigWebSocket(url, args[0])
       : new OrigWebSocket(url);
 
-<<<<<<< HEAD
     if (url && (url.indexOf('convex.cloud') !== -1 || url.indexOf('convex.earntask.io') !== -1)) {
       convexWS = ws;
       origSendFn = ws.send.bind(ws);
@@ -443,27 +419,13 @@
             console.log('[WS-Bot] 🕵️ INTERCEPTED OFFICIAL MUTATION:', data);
           }
 
-=======
-    if (url && url.indexOf('convex.cloud') !== -1) {
-      convexWS = ws;
-      origSendFn = ws.send.bind(ws);
-      log('info', 'Convex WS captured');
-
-      // Intercept outgoing messages
-      var _origSend = ws.send.bind(ws);
-      ws.send = function (data) {
-        try {
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
           var d = JSON.parse(data);
 
           // Capture auth token
           if (d.type === 'Authenticate' && d.value) {
             authToken = d.value;
-<<<<<<< HEAD
             var tokenStatus = preSolvedToken ? 'Ready' : 'Solving/Pending';
             log('info', '🟢 WS Authenticated | Token: ' + tokenStatus);
-=======
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
           }
 
           // Auto-extract user IDs from page traffic
@@ -472,22 +434,13 @@
           }
         } catch (e) { /* not JSON */ }
 
-<<<<<<< HEAD
         return origSendFn(data);
-=======
-        return _origSend(data);
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
       };
 
       // Intercept incoming messages
       ws.addEventListener('message', function (event) {
-<<<<<<< HEAD
         // Fast string check before parsing to minimize CPU overhead
         if (event.data.indexOf('tasks') === -1 && event.data.indexOf('MutationResponse') === -1 && event.data.indexOf('ActionResponse') === -1) return;
-=======
-        // Fast string check before parsing
-        if (event.data.indexOf('tasks') === -1 && event.data.indexOf('MutationResponse') === -1) return;
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
 
         try {
           var d = JSON.parse(event.data);
@@ -500,13 +453,10 @@
         log('warn', 'WS closed (code: ' + event.code + ')');
         convexWS = null;
         origSendFn = null;
-<<<<<<< HEAD
         authToken = null;
         // We no longer remove data-ws-active here. If the extension is enabled,
         // we want the DOM bot to remain disabled even during a reconnect.
         document.documentElement.removeAttribute('data-ws-claiming');
-=======
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
       });
     }
 
@@ -523,31 +473,22 @@
   function extractUserIds(d) {
     try {
       var str = JSON.stringify(d);
-<<<<<<< HEAD
       var updated = false;
       var payload = {};
 
-=======
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
       if (!config.clerkId) {
         var cm = str.match(/"clerkId"\s*:\s*"(user_[^"]+)"/);
         if (cm) {
           config.clerkId = cm[1];
-<<<<<<< HEAD
           payload.clerkId = config.clerkId;
           log('info', 'Auto-captured clerkId: ' + config.clerkId);
           updated = true;
-=======
-          log('info', 'Auto-captured clerkId: ' + config.clerkId);
-          postToBridge('USER_IDS', { clerkId: config.clerkId, userId: config.userId });
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
         }
       }
       if (!config.userId) {
         var um = str.match(/"userId"\s*:\s*"([a-z0-9]{20,})"/);
         if (um) {
           config.userId = um[1];
-<<<<<<< HEAD
           payload.userId = config.userId;
           log('info', 'Auto-captured userId: ' + config.userId);
           updated = true;
@@ -556,12 +497,6 @@
       if (updated) {
         postToBridge('USER_IDS', payload);
       }
-=======
-          log('info', 'Auto-captured userId: ' + config.userId);
-          postToBridge('USER_IDS', { clerkId: config.clerkId, userId: config.userId });
-        }
-      }
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
     } catch (e) { /* ignore */ }
   }
 
@@ -572,7 +507,6 @@
       if (!mods) return;
       for (var i = 0; i < mods.length; i++) {
         var mod = mods[i];
-<<<<<<< HEAD
         if (mod.type === 'QueryUpdated' && mod.value) {
           // Convex might send the array under any key (page, tasks, results, list, etc)
           var arrays = [];
@@ -920,43 +854,6 @@
     log('info', '💓 Heartbeat | WS: ' + connStatus + ' | Token: ' + tokenStatus + ' | Queued: ' + Object.keys(pendingTaskIds).length);
   }, 60000);
 
-=======
-        if (mod.type === 'QueryUpdated' && mod.value && mod.value.tasks) {
-          onTasksReceived(mod.value.tasks);
-        }
-      }
-    } else if (d.requestId && pendingAccepts[d.requestId]) {
-      var acceptData = pendingAccepts[d.requestId];
-      delete pendingAccepts[d.requestId];
-      
-      if (d.type === 'MutationResponse' && d.success) {
-        postToBridge('TASK_CLAIMED', { subreddit: acceptData.subreddit });
-      } else {
-        var reason = d.errorMessage || d.error || (d.type !== 'MutationResponse' ? 'Server returned ' + d.type : 'Server rejected claim');
-        postToBridge('TASK_CLAIM_FAILED', { reason: reason, subreddit: acceptData.subreddit });
-      }
-    }
-  }
-
-  // ─── Task Processing ─────────────────────────────────────
-  function onTasksReceived(tasks) {
-    if (!config.clerkId) return;
-    for (var i = 0; i < tasks.length; i++) {
-      var t = tasks[i];
-      if (!t._id || acceptedTaskIds[t._id]) continue;
-      acceptedTaskIds[t._id] = true;
-      var reqId = requestIdCounter++;
-      pendingAccepts[reqId] = { taskId: t._id, subreddit: t.subreddit || '' };
-      origSendFn(JSON.stringify({
-        type: 'Mutation',
-        requestId: reqId,
-        udfPath: 'tasks/index:acceptTask',
-        args: [{ clerkId: config.clerkId, taskId: t._id }]
-      }));
-    }
-  }
-
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
   // ─── Expose for debugging ───────────────────────────────
   window.__WSBot = {
     getState: function () {
@@ -965,21 +862,13 @@
         hasAuth: !!authToken,
         config: config,
         acceptedCount: Object.keys(acceptedTaskIds).length,
-<<<<<<< HEAD
         pendingCount: Object.keys(pendingTaskIds).length,  // tasks queued waiting for token
         inFlightClaims: inFlightClaims,
         hasPreSolvedToken: !!preSolvedToken,
         tokenAgeSeconds: preSolvedToken ? Math.round((Date.now() - tokenTimestamp) / 1000) : null
-=======
-        pendingAccepts: pendingAccepts,
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
       };
     },
   };
 
-<<<<<<< HEAD
   console.log('[WS-Bot] 🚀 Invisible Turnstile Ghost Pre-solver & Handshake Interceptor loaded!');
-=======
-  console.log('[WS-Bot] 🚀 Interceptor installed (MAIN world) — waiting for Convex WS...');
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
 })();

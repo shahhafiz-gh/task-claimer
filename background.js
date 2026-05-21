@@ -594,15 +594,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       addLog('success', claimMsg);
       
       chrome.storage.local.get('state', ({ state }) => {
-<<<<<<< HEAD
-        state = state || DEFAULT_STATE;
-=======
         // Trigger notification for success (opens dashboard)
         if (state?.desktopNotificationsEnabled !== false) {
           showNotification('Task Claimed!', claimMsg, `claim-${Date.now()}`, 'https://www.reddit.com/notifications');
         }
 
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
+        state = state || DEFAULT_STATE;
         const updated = {
           ...state,
           totalClaimed: (state.totalClaimed || 0) + 1,
@@ -623,15 +620,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       addLog('error', failMsg);
 
       chrome.storage.local.get('state', ({ state }) => {
-<<<<<<< HEAD
-        state = state || DEFAULT_STATE;
-=======
-        // Trigger notification for failure
-        if (state?.desktopNotificationsEnabled !== false) {
-          showNotification('Claim Failed', failMsg, `fail-${Date.now()}`);
-        }
-
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
         const updated = {
           ...state,
           lastStage: 'claim_failed',
@@ -698,55 +686,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
       });
       return true;
-
-<<<<<<< HEAD
-    case 'SOLVE_TURNSTILE_CAPSOLVER': {
-      console.log("[BG] ✅ Received SOLVE_TURNSTILE_CAPSOLVER message from content script!");
-      const { websiteURL, websiteKey } = payload;
-      solveTurnstileCapsolver(websiteURL, websiteKey)
-        .then(result => {
-          console.log("[BG] Sending result back to content script:", result.success);
-          sendResponse(result);
-        })
-        .catch(err => sendResponse({ success: false, error: err.message }));
-      return true; // CRITICAL: Required for async sendResponse
-    }
-
-    case 'SAVE_SITEKEY': {
-      const { siteKey } = payload;
-      chrome.storage.local.get(['state', 'wsConfig'], (data) => {
-        const state = data.state || DEFAULT_STATE;
-        const cfg = data.wsConfig || {};
-        if (cfg.siteKey !== siteKey) {
-          cfg.siteKey = siteKey;
-          chrome.storage.local.set({ wsConfig: cfg }, () => {
-            console.log(`[BG] 💾 Saved Turnstile SiteKey: ${siteKey}`);
-            addLog('info', `💾 Auto-captured Turnstile SiteKey: ${siteKey}`);
-            // Broadcast state updated to content scripts to launch ghost solver
-            chrome.tabs.query({}, (tabs) => {
-              for (const tab of tabs) {
-                chrome.tabs.sendMessage(tab.id, {
-                  type: 'STATE_UPDATED',
-                  payload: {
-                    ...state,
-                    siteKey: siteKey
-                  }
-                }).catch(() => {});
-              }
-            });
-          });
-        }
-      });
-      sendResponse({ ok: true });
-      return true;
-=======
-    case 'SHOW_NOTIFICATION': {
-      const { title, message, notificationId, url } = payload;
-      showNotification(title, message, notificationId, url);
-      sendResponse({ ok: true });
-      return false;
->>>>>>> ad092de2780b0d06dc45d851dd29767b7c5e8ede
-    }
 
     default:
       sendResponse({ error: 'Unknown message type' });

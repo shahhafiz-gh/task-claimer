@@ -12,7 +12,7 @@
 const DEFAULT_STATE = {
   enabled: false,
   totalClaimed: 0,
-  totalSkippedBotBouncer: 0,
+  totalFailedClaims: 0,
   lastTaskClaimed: null,
   lastCaptchaSolved: null,
   lastClaimTimestamp: 0,
@@ -558,6 +558,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         state = state || DEFAULT_STATE;
         const updated = {
           ...state,
+          totalFailedClaims: (state.totalFailedClaims || 0) + 1,
           lastStage: 'claim_failed',
           lastStageTimestamp: Date.now(),
         };
@@ -573,7 +574,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         state = state || DEFAULT_STATE;
         const updated = {
           ...state,
-          totalSkippedBotBouncer: (state.totalSkippedBotBouncer || 0) + 1,
           lastSkippedSubreddit: payload.subreddit || null,
           lastStage: 'skipped_botbouncer',
           lastStageTimestamp: Date.now(),

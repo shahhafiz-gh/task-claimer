@@ -17,7 +17,7 @@
         statusDot: $('statusDot'),
         statusText: $('statusText'),
         totalClaimed: $('totalClaimed'),
-        totalSkippedBotBouncer: $('totalSkippedBotBouncer'),
+        totalFailedClaims: $('totalFailedClaims'),
         lastCaptcha: $('lastCaptcha'),
         lastTask: $('lastTask'),
         lastSkippedSubreddit: $('lastSkippedSubreddit'),
@@ -76,7 +76,7 @@
 
         // Stats
         elements.totalClaimed.textContent = state.totalClaimed || '0';
-        elements.totalSkippedBotBouncer.textContent = state.totalSkippedBotBouncer || '0';
+        elements.totalFailedClaims.textContent = state.totalFailedClaims || '0';
         elements.lastCaptcha.textContent = state.lastCaptchaSolved || '—';
         elements.lastTask.textContent = state.lastTaskClaimed || 'No tasks claimed yet';
         elements.lastSkippedSubreddit.textContent = state.lastSkippedSubreddit

@@ -46,16 +46,20 @@
 
 
       case 'TASK_CLAIMED':
-        safeSendMessage({
-          type: 'TASK_CLAIMED',
-          payload: { subreddit: msg.data.subreddit },
-        });
-        safeSendMessage({
-          type: 'BB_LOG_ENTRY',
-          payload: { subreddit: msg.data.subreddit, status: 'safe', action: 'claimed' },
-        });
         if (window.TB) {
+          if (!window.TB.state.currentSubreddit && msg.data.subreddit) {
+            window.TB.state.currentSubreddit = msg.data.subreddit;
+          }
           window.TB.confirmClaimSuccess();
+        } else {
+          safeSendMessage({
+            type: 'TASK_CLAIMED',
+            payload: { subreddit: msg.data.subreddit },
+          });
+          safeSendMessage({
+            type: 'BB_LOG_ENTRY',
+            payload: { subreddit: msg.data.subreddit, status: 'safe', action: 'claimed' },
+          });
         }
         break;
 
@@ -134,6 +138,9 @@
           bbEnabled: state.botBouncerCheckEnabled !== false,
           // Always deliver a siteKey — use stored value first, fall back to known key
           siteKey: wsConfig.siteKey || KNOWN_SITE_KEY,
+          isAuthenticated: state.isAuthenticated || false,
+          userStatus: state.userStatus || 'pending',
+          tasksRemaining: state.tasksRemaining || 0,
         },
       }, '*');
     });

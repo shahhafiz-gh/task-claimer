@@ -5,11 +5,15 @@
   "description": "Accept First, Verify Later — ultra-fast task claiming (<50ms) with parallel BotBouncer protection.",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "identity"
   ],
   "host_permissions": [
-    "https://api.capsolver.com/*",
-    "*://*.reddit.com/*"
+    "*://*.reddit.com/*",
+    "https://*.firebaseio.com/*",
+    "https://*.googleapis.com/*",
+    "https://*.firebaseapp.com/*",
+    "https://*.firebasestorage.app/*"
   ],
 
   "background": {

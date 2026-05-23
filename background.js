@@ -9,6 +9,27 @@
  *   - Activity log system
  */
 
+importScripts(
+  'assets/firebase/firebase-app-compat.js',
+  'assets/firebase/firebase-auth-compat.js',
+  'assets/firebase/firebase-firestore-compat.js'
+);
+
+const firebaseConfig = {
+  apiKey: "AIzaSyD6XJ6g8M5X-aczWcBPxx9aO2-itF6VYss",
+  authDomain: "rip-et.firebaseapp.com",
+  projectId: "rip-et",
+  storageBucket: "rip-et.firebasestorage.app",
+  messagingSenderId: "1040676980791",
+  appId: "1:1040676980791:web:809adb603cd254c72b97b2",
+  measurementId: "G-R07N9N74QB"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+const auth = firebase.auth();
+
+
 const DEFAULT_STATE = {
   enabled: false,
   totalClaimed: 0,
@@ -19,6 +40,11 @@ const DEFAULT_STATE = {
   lastSkippedSubreddit: null,
   lastStage: null,
   lastStageTimestamp: 0,
+  // Firebase State
+  isAuthenticated: false,
+  userEmail: null,
+  tasksRemaining: 0,
+  userStatus: 'pending',
   // Configurable selectors
   claimSelector: '',
   captchaSelector: '',
@@ -56,6 +82,70 @@ function addLog(level, message) {
     chrome.storage.local.set({ logs: arr });
   });
 }
+
+function broadcastState(updated) {
+  // Send to popup and other extension pages
+  try {
+    chrome.runtime.sendMessage({
+      type: 'STATE_UPDATED',
+      payload: updated,
+    }, () => {
+      // Catch and ignore lastError
+      const _ = chrome.runtime.lastError;
+    });
+  } catch (e) {}
+
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      try {
+        chrome.tabs.sendMessage(tab.id, {
+          type: 'STATE_UPDATED',
+          payload: updated,
+        }, () => {
+          const _ = chrome.runtime.lastError;
+        });
+      } catch (e) {}
+    }
+  });
+}
+
+// ─── Firebase Auth & Firestore Sync ──────────────────────────────
+auth.onAuthStateChanged((user) => {
+  if (user) {
+    chrome.storage.local.get('state', ({ state }) => {
+      const updated = { ...state, isAuthenticated: true, userEmail: user.email };
+      chrome.storage.local.set({ state: updated }, () => broadcastState(updated));
+    });
+
+    // Listen to user document in Firestore
+    db.collection('users').doc(user.uid).onSnapshot((doc) => {
+      if (doc.exists) {
+        const data = doc.data();
+        chrome.storage.local.get('state', ({ state }) => {
+          const updated = { 
+            ...state, 
+            tasksRemaining: data.tasksRemaining || 0,
+            userStatus: data.status || 'pending'
+          };
+          chrome.storage.local.set({ state: updated }, () => broadcastState(updated));
+        });
+      } else {
+        // Create document if doesn't exist
+        db.collection('users').doc(user.uid).set({
+          email: user.email,
+          tasksRemaining: 0,
+          status: 'pending',
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      }
+    });
+  } else {
+    chrome.storage.local.get('state', ({ state }) => {
+      const updated = { ...state, isAuthenticated: false, userEmail: null, tasksRemaining: 0, userStatus: 'pending' };
+      chrome.storage.local.set({ state: updated }, () => broadcastState(updated));
+    });
+  }
+});
 
 // ─── BB Logs System (separate from activity logs) ──────────────────
 const MAX_BB_LOG_ENTRIES = 200;
@@ -414,14 +504,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         chrome.storage.local.set({ state: updated }, () => {
-          chrome.tabs.query({}, (tabs) => {
-            for (const tab of tabs) {
-              chrome.tabs.sendMessage(tab.id, {
-                type: 'STATE_UPDATED',
-                payload: updated,
-              }).catch(() => { });
-            }
-          });
+          broadcastState(updated);
           sendResponse({ state: updated });
         });
       });
@@ -535,6 +618,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'TASK_CLAIMED':
       addLog('success', `🎉 Task claimed! Captcha: ${payload.captchaExpression || 'N/A'} = ${payload.captchaAnswer || '?'}${payload.subreddit ? ` | r/${payload.subreddit}` : ''}`);
+      
+      // Decrement tasksRemaining in Firestore
+      const user = auth.currentUser;
+      if (user) {
+        db.collection('users').doc(user.uid).update({
+          tasksRemaining: firebase.firestore.FieldValue.increment(-1)
+        }).catch(err => console.error("Error decrementing tasks:", err));
+      }
+
       chrome.storage.local.get('state', ({ state }) => {
         state = state || DEFAULT_STATE;
         const updated = {
@@ -590,14 +682,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const updated = { ...state, enabled: !state.enabled };
         addLog('info', updated.enabled ? '▶️ Extension ENABLED' : '⏸️ Extension PAUSED');
         chrome.storage.local.set({ state: updated }, () => {
-          chrome.tabs.query({}, (tabs) => {
-            for (const tab of tabs) {
-              chrome.tabs.sendMessage(tab.id, {
-                type: 'STATE_UPDATED',
-                payload: updated,
-              }).catch(() => { });
-            }
-          });
+          broadcastState(updated);
           sendResponse({ state: updated });
         });
       });
@@ -645,21 +730,81 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             console.log(`[BG] 💾 Saved Turnstile SiteKey: ${siteKey}`);
             addLog('info', `💾 Auto-captured Turnstile SiteKey: ${siteKey}`);
             // Broadcast state updated to content scripts to launch ghost solver
-            chrome.tabs.query({}, (tabs) => {
-              for (const tab of tabs) {
-                chrome.tabs.sendMessage(tab.id, {
-                  type: 'STATE_UPDATED',
-                  payload: {
-                    ...state,
-                    siteKey: siteKey
-                  }
-                }).catch(() => {});
-              }
-            });
+            broadcastState({ ...state, siteKey: siteKey });
           });
         }
       });
       sendResponse({ ok: true });
+      return true;
+    }
+
+    // ─── Firebase Auth Commands ─────────────────────────────
+    case 'LOGIN':
+    case 'SIGNUP': {
+      const { email, password } = payload;
+      const promise = (request.type === 'SIGNUP')
+        ? auth.createUserWithEmailAndPassword(email, password)
+        : auth.signInWithEmailAndPassword(email, password);
+      
+      promise
+        .then(() => sendResponse({ success: true }))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+    }
+
+    case 'GOOGLE_LOGIN': {
+      const clientId = '1040676980791-et2cgll13s07c6ko5t3pr57trfl644bt.apps.googleusercontent.com';
+      const redirectUri = chrome.identity.getRedirectURL(); // e.g. https://<extension-id>.chromiumapp.org/
+      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&response_type=id_token&redirect_uri=${encodeURIComponent(redirectUri)}&scope=openid%20email%20profile&nonce=random_nonce_123`;
+
+      chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true }, (responseUrl) => {
+        if (chrome.runtime.lastError || !responseUrl) {
+          console.error('[OAuth Error]', chrome.runtime.lastError);
+          sendResponse({ success: false, error: chrome.runtime.lastError?.message || 'OAuth flow cancelled' });
+          return;
+        }
+
+        try {
+          // Parse id_token from the hash fragment: https://<id>.chromiumapp.org/#id_token=...
+          const hashStr = new URL(responseUrl).hash.substring(1);
+          const hashParams = new URLSearchParams(hashStr);
+          const idToken = hashParams.get('id_token');
+
+          if (!idToken) {
+            sendResponse({ success: false, error: 'No id_token received from Google.' });
+            return;
+          }
+
+          const credential = firebase.auth.GoogleAuthProvider.credential(idToken);
+          auth.signInWithCredential(credential)
+            .then(() => sendResponse({ success: true }))
+            .catch((err) => sendResponse({ success: false, error: err.message }));
+        } catch (e) {
+          sendResponse({ success: false, error: e.message });
+        }
+      });
+      return true; // Keep message channel open for async response
+    }
+
+    case 'REQUEST_PLAN': {
+      const user = auth.currentUser;
+      if (!user) {
+        sendResponse({ success: false, error: 'Not logged in' });
+        return false;
+      }
+      db.collection('users').doc(user.uid).update({
+        requestedPlan: payload.plan,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      })
+      .then(() => sendResponse({ success: true }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+    }
+
+    case 'LOGOUT': {
+      auth.signOut()
+        .then(() => sendResponse({ success: true }))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
       return true;
     }
 

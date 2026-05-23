@@ -12,12 +12,25 @@
     const $ = (id) => document.getElementById(id);
 
     const elements = {
+        // Auth Elements
+        authScreen: $('authScreen'),
+        pendingScreen: $('pendingScreen'),
+        mainApp: $('mainApp'),
+        authEmail: $('authEmail'),
+        authPassword: $('authPassword'),
+        authSubmit: $('authSubmit'),
+        authError: $('authError'),
+        authToggleMode: $('authToggleMode'),
+        pendingLogout: $('pendingLogout'),
+
+        // Main App Elements
         masterToggle: $('masterToggle'),
         statusBar: $('statusBar'),
         statusDot: $('statusDot'),
         statusText: $('statusText'),
         totalClaimed: $('totalClaimed'),
         totalFailedClaims: $('totalFailedClaims'),
+        tasksRemaining: $('tasksRemaining'),
         lastCaptcha: $('lastCaptcha'),
         lastTask: $('lastTask'),
         lastSkippedSubreddit: $('lastSkippedSubreddit'),
@@ -65,6 +78,21 @@
     function renderState(state) {
         if (!state) return;
 
+        // Auth Logic
+        if (!state.isAuthenticated) {
+            elements.authScreen.style.display = 'flex';
+            elements.pendingScreen.style.display = 'none';
+            elements.mainApp.style.display = 'none';
+        } else if (state.userStatus !== 'approved' || state.tasksRemaining <= 0) {
+            elements.authScreen.style.display = 'none';
+            elements.pendingScreen.style.display = 'flex';
+            elements.mainApp.style.display = 'none';
+        } else {
+            elements.authScreen.style.display = 'none';
+            elements.pendingScreen.style.display = 'none';
+            elements.mainApp.style.display = 'flex';
+        }
+
         // Toggle
         elements.masterToggle.checked = state.enabled;
 
@@ -77,6 +105,7 @@
         // Stats
         elements.totalClaimed.textContent = state.totalClaimed || '0';
         elements.totalFailedClaims.textContent = state.totalFailedClaims || '0';
+        elements.tasksRemaining.textContent = state.tasksRemaining || '0';
         elements.lastCaptcha.textContent = state.lastCaptchaSolved || '—';
         elements.lastTask.textContent = state.lastTaskClaimed || 'No tasks claimed yet';
         elements.lastSkippedSubreddit.textContent = state.lastSkippedSubreddit
@@ -137,6 +166,90 @@
     }
 
     // ─── Event Listeners ────────────────────────────────────────────
+
+    // Auth Listeners
+    let isSignupMode = false;
+
+    elements.authToggleMode.addEventListener('click', () => {
+        isSignupMode = !isSignupMode;
+        elements.authSubmit.textContent = isSignupMode ? 'Sign Up' : 'Login';
+        elements.authToggleMode.innerHTML = isSignupMode 
+            ? "Already have an account? <span>Login</span>" 
+            : "Don't have an account? <span>Sign up</span>";
+        elements.authError.textContent = '';
+    });
+
+    elements.authSubmit.addEventListener('click', () => {
+        const email = elements.authEmail.value.trim();
+        const password = elements.authPassword.value.trim();
+        if (!email || !password) {
+            elements.authError.textContent = 'Please enter email and password';
+            return;
+        }
+
+        elements.authSubmit.disabled = true;
+        elements.authSubmit.textContent = 'Loading...';
+        elements.authError.textContent = '';
+
+        const action = isSignupMode ? 'SIGNUP' : 'LOGIN';
+        chrome.runtime.sendMessage({ type: action, payload: { email, password } }, (res) => {
+            elements.authSubmit.disabled = false;
+            elements.authSubmit.textContent = isSignupMode ? 'Sign Up' : 'Login';
+            
+            if (!res || !res.success) {
+                elements.authError.textContent = res?.error || 'Authentication failed';
+            }
+        });
+    });
+
+    const authGoogleBtn = document.getElementById('authGoogle');
+    if (authGoogleBtn) {
+        authGoogleBtn.addEventListener('click', () => {
+            authGoogleBtn.disabled = true;
+            elements.authError.textContent = '';
+            
+            chrome.runtime.sendMessage({ type: 'GOOGLE_LOGIN' }, (res) => {
+                authGoogleBtn.disabled = false;
+                if (!res || !res.success) {
+                    elements.authError.textContent = res?.error || 'Google login failed';
+                } else {
+                    // Force refresh state immediately upon successful login
+                    chrome.runtime.sendMessage({ type: 'GET_STATE' }, (response) => {
+                        if (response?.state) {
+                            renderState(response.state);
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    elements.pendingLogout.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ type: 'LOGOUT' });
+    });
+
+    // Plan Selection listeners
+    const planBtns = document.querySelectorAll('.plan-btn');
+    const planStatus = document.getElementById('planStatus');
+    planBtns.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const planName = e.target.getAttribute('data-plan');
+            planBtns.forEach(b => b.disabled = true);
+            planStatus.textContent = 'Requesting plan...';
+            planStatus.style.color = 'var(--text-muted)';
+            
+            chrome.runtime.sendMessage({ type: 'REQUEST_PLAN', payload: { plan: planName } }, (res) => {
+                planBtns.forEach(b => b.disabled = false);
+                if (res && res.success) {
+                    planStatus.style.color = 'var(--green)';
+                    planStatus.textContent = `✓ ${planName} requested! Waiting for admin approval.`;
+                } else {
+                    planStatus.style.color = 'var(--red)';
+                    planStatus.textContent = res?.error || 'Failed to request plan.';
+                }
+            });
+        });
+    });
 
     // Master toggle
     elements.masterToggle.addEventListener('change', () => {
@@ -430,6 +543,12 @@
     chrome.runtime.sendMessage({ type: 'GET_STATE' }, (response) => {
         if (response?.state) {
             renderState(response.state);
+        }
+    });
+
+    chrome.runtime.onMessage.addListener((message) => {
+        if (message.type === 'STATE_UPDATED') {
+            renderState(message.payload);
         }
     });
 

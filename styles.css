@@ -917,3 +917,301 @@ body {
   color: var(--text-muted);
   letter-spacing: 0.02em;
 }
+
+/* ─── Auth Screen ───────────────────────────────────────── */
+.auth-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 420px;
+  padding: 24px;
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+}
+
+.auth-logo {
+  font-size: 48px;
+  margin-bottom: 12px;
+  animation: float 3s ease-in-out infinite;
+}
+
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-6px); }
+  100% { transform: translateY(0px); }
+}
+
+.auth-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+  letter-spacing: -0.02em;
+}
+
+.auth-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 24px;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.auth-form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  color: var(--text-primary);
+  outline: none;
+  transition: all var(--transition);
+}
+
+.auth-input::placeholder {
+  color: var(--text-muted);
+}
+
+.auth-input:focus {
+  border-color: var(--accent);
+  background: #fff;
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.auth-btn {
+  width: 100%;
+  padding: 12px;
+  margin-top: 4px;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: white;
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+  box-shadow: 0 2px 4px rgba(59, 107, 232, 0.2);
+}
+
+.auth-btn:hover {
+  background: #2a52be;
+  box-shadow: 0 4px 8px rgba(59, 107, 232, 0.3);
+  transform: translateY(-1px);
+}
+
+.auth-btn:active {
+  transform: translateY(0px);
+}
+
+.auth-btn:disabled {
+  background: var(--text-muted);
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 11px;
+  margin: 4px 0;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px solid var(--border);
+}
+
+.auth-divider span {
+  padding: 0 10px;
+}
+
+.auth-google {
+  background: white;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+
+.auth-google:hover {
+  background: #f8f9fa;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.08);
+}
+
+.google-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.auth-switch {
+  margin-top: 20px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--transition);
+}
+
+.auth-switch:hover {
+  color: var(--text-secondary);
+}
+
+.auth-switch span {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.auth-error {
+  color: var(--red);
+  font-size: 12px;
+  margin-top: 8px;
+  text-align: center;
+  font-weight: 500;
+}
+
+/* ─── Pending / Plan Selection Screen ────────────────────────────────────── */
+.pending-screen {
+  text-align: center;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: auto;
+  min-height: 420px;
+  background: var(--bg-card);
+}
+
+.plan-cards {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+  width: 100%;
+}
+
+.plan-card {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  transition: all 0.2s ease;
+}
+
+.plan-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+  border-color: var(--accent-light);
+}
+
+.plan-pro {
+  background: linear-gradient(145deg, #ffffff, #f8faff);
+  border: 2px solid var(--accent);
+  box-shadow: 0 4px 15px rgba(59, 107, 232, 0.1);
+}
+
+.plan-pro:hover {
+  box-shadow: 0 6px 20px rgba(59, 107, 232, 0.15);
+}
+
+.plan-badge {
+  position: absolute;
+  top: -10px;
+  background: var(--accent);
+  color: white;
+  font-size: 10px;
+  font-weight: bold;
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+}
+
+.plan-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.plan-price {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.plan-feature {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 15px;
+  flex-grow: 1;
+}
+
+.plan-btn {
+  width: 100%;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: white;
+  color: var(--text-primary);
+  transition: all 0.2s;
+}
+
+.plan-btn:hover {
+  background: var(--bg-body);
+}
+
+.plan-btn-pro {
+  background: var(--accent);
+  color: white;
+  border: none;
+}
+
+.plan-btn-pro:hover {
+  background: #2a52be;
+}
+
+.plan-status {
+  margin-top: 15px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--green);
+  min-height: 15px;
+}
+
+.pending-screen .auth-logo {
+  font-size: 54px;
+  margin-bottom: 16px;
+  animation: pulse-dot 2.5s ease-in-out infinite;
+}
+
+.pending-screen .auth-subtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-top: 10px;
+  max-width: 280px;
+}

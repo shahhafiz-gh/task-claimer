@@ -25,6 +25,9 @@
     userId: '',
     siteKey: HARDCODED_SITE_KEY, // Pre-seeded — ghost solver starts immediately!
     initialized: false,
+    isAuthenticated: false,
+    userStatus: 'pending',
+    tasksRemaining: 0,
   };
 
   // ─── State ───────────────────────────────────────────────
@@ -49,8 +52,8 @@
     var prefix = '[WS-Bot]';
     switch (level) {
       case 'success': console.log(prefix + ' ✅ ' + message); break;
-      case 'error':   console.error(prefix + ' ❌ ' + message); break;
-      case 'warn':    console.warn(prefix + ' ⚠️ ' + message); break;
+      case 'error':   console.log(prefix + ' ❌ ' + message); break;
+      case 'warn':    console.log(prefix + ' ⚠️ ' + message); break;
       case 'debug':   console.debug(prefix + ' 🔍 ' + message); break;
       default:        console.log(prefix + ' ' + message);
     }
@@ -80,6 +83,9 @@
         config.userId  = msg.data.userId  || config.userId;
         // Keep hardcoded key if storage doesn't have one
         config.siteKey = msg.data.siteKey || config.siteKey || HARDCODED_SITE_KEY;
+        config.isAuthenticated = msg.data.isAuthenticated || false;
+        config.userStatus = msg.data.userStatus || 'pending';
+        config.tasksRemaining = msg.data.tasksRemaining || 0;
         config.initialized = true;
 
         // Permanently set the WS active flag if enabled, so the DOM bot NEVER
@@ -626,6 +632,12 @@
       log('info', '⏸️ Extension is paused. Ignoring tasks.');
       return;
     }
+    
+    if (!config.isAuthenticated || config.userStatus !== 'approved' || config.tasksRemaining <= 0) {
+      log('error', '⛔ Tasks blocked by licensing quota or auth status.');
+      return;
+    }
+
     if (!config.clerkId) {
       log('error', '❌ Missing clerkId! Cannot claim tasks over WS. Please ensure you are logged in and refresh the page.');
       return;

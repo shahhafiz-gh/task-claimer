@@ -1,5 +1,5 @@
 /**
- * Popup Script — UI Controller v2 — "Accept First, Verify Later"
+ * Popup Script — UI Controller v1.0.0 — "Accept First, Verify Later"
  *
  * Reads state from background, renders UI, handles user interactions.
  * NEW: BB Logs panel, BB Settings, cache management, export.
@@ -22,6 +22,7 @@
         authError: $('authError'),
         authToggleMode: $('authToggleMode'),
         pendingLogout: $('pendingLogout'),
+        pendingRefresh: $('pendingRefresh'),
 
         // Main App Elements
         masterToggle: $('masterToggle'),
@@ -83,14 +84,27 @@
             elements.authScreen.style.display = 'flex';
             elements.pendingScreen.style.display = 'none';
             elements.mainApp.style.display = 'none';
-        } else if (state.userStatus !== 'approved' || state.tasksRemaining <= 0) {
-            elements.authScreen.style.display = 'none';
-            elements.pendingScreen.style.display = 'flex';
-            elements.mainApp.style.display = 'none';
         } else {
-            elements.authScreen.style.display = 'none';
-            elements.pendingScreen.style.display = 'none';
-            elements.mainApp.style.display = 'flex';
+            const status = (state.userStatus || '').trim().toLowerCase();
+            if (status !== 'approved' || state.tasksRemaining <= 0) {
+                elements.authScreen.style.display = 'none';
+                elements.pendingScreen.style.display = 'flex';
+                elements.mainApp.style.display = 'none';
+                
+                // Update UI to explain why they are on this screen
+                const planStatus = document.getElementById('planStatus');
+                if (status === 'approved' && state.tasksRemaining <= 0) {
+                    planStatus.textContent = 'You have 0 tasks remaining. Please request a new plan.';
+                    planStatus.style.color = 'var(--red)';
+                } else {
+                    planStatus.textContent = 'Waiting for admin approval...';
+                    planStatus.style.color = 'var(--text-muted)';
+                }
+            } else {
+                elements.authScreen.style.display = 'none';
+                elements.pendingScreen.style.display = 'none';
+                elements.mainApp.style.display = 'flex';
+            }
         }
 
         // Toggle
@@ -227,6 +241,19 @@
     elements.pendingLogout.addEventListener('click', () => {
         chrome.runtime.sendMessage({ type: 'LOGOUT' });
     });
+
+    if (elements.pendingRefresh) {
+        elements.pendingRefresh.addEventListener('click', () => {
+            elements.pendingRefresh.textContent = 'Refreshing...';
+            elements.pendingRefresh.disabled = true;
+            // Force Firebase background fetch by sending a ping
+            chrome.runtime.sendMessage({ type: 'FORCE_REFRESH_STATE' }, (res) => {
+                elements.pendingRefresh.textContent = 'Refresh';
+                elements.pendingRefresh.disabled = false;
+                if (res?.state) renderState(res.state);
+            });
+        });
+    }
 
     // Plan Selection listeners
     const planBtns = document.querySelectorAll('.plan-btn');

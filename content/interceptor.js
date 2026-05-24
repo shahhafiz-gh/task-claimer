@@ -84,7 +84,7 @@
         // Keep hardcoded key if storage doesn't have one
         config.siteKey = msg.data.siteKey || config.siteKey || HARDCODED_SITE_KEY;
         config.isAuthenticated = msg.data.isAuthenticated || false;
-        config.userStatus = msg.data.userStatus || 'pending';
+        config.userStatus = (msg.data.userStatus || 'pending').trim();
         config.tasksRemaining = msg.data.tasksRemaining || 0;
         config.initialized = true;
 
@@ -633,8 +633,9 @@
       return;
     }
     
-    if (!config.isAuthenticated || config.userStatus !== 'approved' || config.tasksRemaining <= 0) {
-      log('error', '⛔ Tasks blocked by licensing quota or auth status.');
+    var trimmedStatus = (config.userStatus || '').trim().toLowerCase();
+    if (!config.isAuthenticated || trimmedStatus !== 'approved' || config.tasksRemaining <= 0) {
+      log('error', '⛔ Tasks blocked — auth:' + config.isAuthenticated + ' status:"' + config.userStatus + '" tasks:' + config.tasksRemaining);
       return;
     }
 

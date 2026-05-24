@@ -1,5 +1,5 @@
 /**
- * Background Service Worker — v5 "Accept First, Verify Later"
+ * Background Service Worker — v1.0.0 "Accept First, Verify Later"
  *
  * Handles:
  *   - State persistence & broadcasting
@@ -510,6 +510,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       return true;
 
+    case 'FORCE_REFRESH_STATE':
+      if (auth.currentUser) {
+        db.collection('users').doc(auth.currentUser.uid).get().then((doc) => {
+          chrome.storage.local.get('state', ({ state }) => {
+            state = state || DEFAULT_STATE;
+            if (doc.exists) {
+              const data = doc.data();
+              state.tasksRemaining = data.tasksRemaining || 0;
+              state.userStatus = data.status || 'pending';
+            }
+            chrome.storage.local.set({ state }, () => {
+              broadcastState(state);
+              sendResponse({ state });
+            });
+          });
+        }).catch((err) => {
+          console.error("Force refresh failed:", err);
+          chrome.storage.local.get('state', ({ state }) => {
+            sendResponse({ state: state || DEFAULT_STATE });
+          });
+        });
+      } else {
+        chrome.storage.local.get('state', ({ state }) => {
+          sendResponse({ state: state || DEFAULT_STATE });
+        });
+      }
+      return true;
+
     case 'CHECK_BOTBOUNCER': {
       const { subreddit } = payload;
       if (!subreddit) {
@@ -742,7 +770,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'LOGIN':
     case 'SIGNUP': {
       const { email, password } = payload;
-      const promise = (request.type === 'SIGNUP')
+      const promise = (type === 'SIGNUP')
         ? auth.createUserWithEmailAndPassword(email, password)
         : auth.signInWithEmailAndPassword(email, password);
       

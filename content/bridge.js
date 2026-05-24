@@ -139,7 +139,7 @@
           // Always deliver a siteKey — use stored value first, fall back to known key
           siteKey: wsConfig.siteKey || KNOWN_SITE_KEY,
           isAuthenticated: state.isAuthenticated || false,
-          userStatus: state.userStatus || 'pending',
+          userStatus: (state.userStatus || 'pending').trim(),
           tasksRemaining: state.tasksRemaining || 0,
         },
       }, '*');
